@@ -1,0 +1,53 @@
+name: Release plugin
+
+# Two ways to release (BRAT installs from the latest GitHub release):
+#  1. Actions tab → "Release plugin" → Run workflow  (uses the version in manifest.json)
+#  2. git tag 0.0.2 && git push origin 0.0.2        (tag must equal manifest.json version, no "v")
+
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Resolve version
+        id: v
+        run: |
+          VERSION=$(node -p "require('./manifest.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match manifest.json version $VERSION"
+            exit 1
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.v.outputs.version }}"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "::error::Release $VERSION already exists. Bump the version (npm version patch) and try again."
+            exit 1
+          fi
+          gh release create "$VERSION" main.js manifest.json styles.css \
+            --target "${GITHUB_SHA}" \
+            --title "$VERSION" \
+            --notes "Linvau pilot build $VERSION. Install with BRAT: linvau/linvau-obsidian"

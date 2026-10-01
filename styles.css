@@ -1,0 +1,27 @@
+/* Linvau pilot panel — uses Obsidian theme variables only */
+.linvau-log { padding: var(--size-4-3); font-size: var(--font-ui-small); }
+.linvau-log h4 { margin: var(--size-4-4) 0 var(--size-4-2); }
+.linvau-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--size-4-2); }
+.linvau-stat { background: var(--background-secondary); border-radius: var(--radius-m); padding: var(--size-4-2); text-align: center; }
+.linvau-stat-value { font-size: var(--font-ui-large); font-weight: var(--font-semibold); }
+.linvau-stat-label, .linvau-muted { color: var(--text-muted); font-size: var(--font-ui-smaller); }
+.linvau-sla { margin-top: var(--size-4-2); padding: var(--size-4-1) var(--size-4-2); border-radius: var(--radius-s); }
+.linvau-sla.is-ok { background: rgba(var(--color-green-rgb), 0.15); color: var(--color-green); }
+.linvau-sla.is-bad { background: rgba(var(--color-red-rgb), 0.15); color: var(--color-red); }
+.linvau-actions { display: flex; flex-wrap: wrap; gap: var(--size-4-2); margin-top: var(--size-4-2); }
+.linvau-actions button { display: inline-flex; align-items: center; gap: var(--size-4-1); }
+.linvau-btn-icon { display: inline-flex; }
+.linvau-btn-icon svg { width: 14px; height: 14px; }
+.linvau-note-row { padding: var(--size-4-1) 0; border-bottom: 1px solid var(--background-modifier-border); }
+.linvau-badge { font-size: var(--font-ui-smaller); padding: 0 var(--size-4-1); border-radius: var(--radius-s); margin-right: var(--size-4-1); background: var(--background-modifier-hover); }
+.linvau-badge.state-active { color: var(--color-green); }
+.linvau-badge.state-pending, .linvau-badge.state-publishing { color: var(--color-yellow); }
+.linvau-badge.state-error, .linvau-badge.state-orphan { color: var(--color-red); }
+.linvau-badge.state-suspended { color: var(--text-muted); }
+.linvau-error { color: var(--color-red); font-size: var(--font-ui-smaller); }
+.linvau-entries { font-family: var(--font-monospace); font-size: var(--font-ui-smaller); max-height: 50vh; overflow-y: auto; }
+.linvau-entry { padding: 1px 0; user-select: text; }
+.linvau-entry.level-warn { color: var(--color-yellow); }
+.linvau-entry.level-error { color: var(--color-red); }
+.linvau-entry.level-debug { color: var(--text-faint); }
+.linvau-time { color: var(--text-faint); }
