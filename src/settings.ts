@@ -68,6 +68,18 @@ export class LinvauSettingTab extends PluginSettingTab {
 					}));
 
 		new Setting(containerEl)
+			.setName("Maximum wait while editing (seconds)")
+			.setDesc("During a long editing session, publish at least this often even if you keep typing.")
+			.addSlider((s) =>
+				s.setLimits(15, 120, 5)
+					.setValue(this.plugin.data.settings.maxWaitSeconds)
+					.setDynamicTooltip()
+					.onChange(async (v) => {
+						this.plugin.data.settings.maxWaitSeconds = v;
+						await this.plugin.saveState();
+					}));
+
+		new Setting(containerEl)
 			.setName("Verbose log")
 			.setDesc("Also log every save event and skipped (unchanged) syncs.")
 			.addToggle((t) =>

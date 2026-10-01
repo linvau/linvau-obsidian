@@ -72,7 +72,8 @@ export default class LinvauPlugin extends Plugin {
 		this.data = {
 			settings: { ...DEFAULT_SETTINGS, ...(raw?.settings ?? {}) },
 			notes: raw?.notes ?? {},
-			latencies: raw?.latencies ?? [],
+			// Samples from 0.0.1 measured from the first save of a session; they are not comparable.
+			latencies: (raw?.latencies ?? []).filter((l) => typeof (l as LatencySample).sinceLastSave === "number"),
 		};
 	}
 
@@ -346,17 +347,22 @@ export default class LinvauPlugin extends Plugin {
 	// ─────────────────────────────── Diagnostics (exported manually by the author; no telemetry)
 
 	async copyDiagnostics() {
-		const since = this.data.latencies.map((s) => s.sinceEdit);
+		const since = this.data.latencies.map((s) => s.sinceLastSave);
+		const session = this.data.latencies.map((s) => s.sinceFirstSave);
 		const api = this.data.latencies.map((s) => s.api);
 		const diag = {
 			generatedAt: new Date().toISOString(),
 			plugin: this.manifest.version,
 			platform: this.platformName(),
 			online: navigator.onLine,
-			settings: { apiBase: this.data.settings.apiBase, debounceSeconds: this.data.settings.debounceSeconds, tokenSet: !!this.getToken() },
+			settings: {
+				apiBase: this.data.settings.apiBase, debounceSeconds: this.data.settings.debounceSeconds,
+				maxWaitSeconds: this.data.settings.maxWaitSeconds, tokenSet: !!this.getToken(),
+			},
 			latency: {
 				samples: since.length,
-				sinceEditP50: percentile(since, 50), sinceEditP95: percentile(since, 95), sinceEditMax: since.length ? Math.max(...since) : null,
+				afterLastSaveP50: percentile(since, 50), afterLastSaveP95: percentile(since, 95), afterLastSaveMax: since.length ? Math.max(...since) : null,
+				sessionP95: percentile(session, 95),
 				apiP50: percentile(api, 50), apiP95: percentile(api, 95),
 			},
 			notes: Object.values(this.data.notes).map((n) => ({

@@ -15,13 +15,16 @@ export interface NoteRecord {
 export interface LinvauSettings {
 	apiBase: string;
 	debounceSeconds: number;
+	maxWaitSeconds: number;
 	verbose: boolean;
 }
 
 export interface LatencySample {
 	ts: number;
-	/** From the first local save (vault "modify") to the API acknowledging the version. SLA target: P95 < 15 s. */
-	sinceEdit: number;
+	/** From the LAST local save to the API acknowledging the version. SLA target: P95 < 15 s. */
+	sinceLastSave: number;
+	/** From the first save of the editing session (informational: how long a session was). */
+	sinceFirstSave: number;
 	/** Round trip of the publish request alone. */
 	api: number;
 	bytes: number;
@@ -36,6 +39,7 @@ export interface PluginData {
 export const DEFAULT_SETTINGS: LinvauSettings = {
 	apiBase: "",
 	debounceSeconds: 5,
+	maxWaitSeconds: 30,
 	verbose: false,
 };
 

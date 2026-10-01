@@ -46,12 +46,13 @@ export class LinvauLogView extends ItemView {
 
 		// ── Metrics
 		const samples = plugin.data.latencies;
-		const since = samples.map((s) => s.sinceEdit);
+		const since = samples.map((s) => s.sinceLastSave);
+		const session = samples.map((s) => s.sinceFirstSave);
 		const api = samples.map((s) => s.api);
 		const p95 = percentile(since, 95);
 
 		const metrics = contentEl.createDiv({ cls: "linvau-metrics" });
-		metrics.createEl("h4", { text: "Sync latency (save → live)" });
+		metrics.createEl("h4", { text: "Sync latency (last save → live)" });
 		const grid = metrics.createDiv({ cls: "linvau-grid" });
 		const stat = (label: string, value: string) => {
 			const cell = grid.createDiv({ cls: "linvau-stat" });
@@ -62,6 +63,7 @@ export class LinvauLogView extends ItemView {
 		stat("P50", fmtMs(percentile(since, 50)));
 		stat("P95", fmtMs(p95));
 		stat("API P95", fmtMs(percentile(api, 95)));
+		stat("Session P95", fmtMs(percentile(session, 95)));
 
 		if (p95 !== null) {
 			const ok = p95 < SLA_SYNC_P95_MS;
@@ -72,7 +74,7 @@ export class LinvauLogView extends ItemView {
 		}
 		metrics.createDiv({
 			cls: "linvau-muted",
-			text: `Includes the ${plugin.data.settings.debounceSeconds}s debounce. Pending: ${plugin.sync.pendingCount()}. Online: ${navigator.onLine ? "yes" : "no"}.`,
+			text: `Includes the ${plugin.data.settings.debounceSeconds}s debounce (max ${plugin.data.settings.maxWaitSeconds}s while typing). Pending: ${plugin.sync.pendingCount()}. Online: ${navigator.onLine ? "yes" : "no"}.`,
 		});
 
 		const actions = metrics.createDiv({ cls: "linvau-actions" });

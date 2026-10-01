@@ -21,6 +21,8 @@ export class SyncEngine {
 	private retries = new Map<string, number>();
 	/** Saves that happen while a request is in flight start a new latency window. */
 	private dirtyDuringFlight = new Map<string, number>();
+	/** Time of the most recent save — the SLA is measured from here ("I stopped editing" → readers see it). */
+	private lastSave = new Map<string, number>();
 
 	constructor(private plugin: LinvauPlugin) {}
 
@@ -31,14 +33,30 @@ export class SyncEngine {
 	markDirty(path: string, reason: string) {
 		const rec = this.plugin.data.notes[path];
 		if (!rec || rec.state === "SUSPENDED" || rec.state === "ORPHAN") return;
+		const now = Date.now();
+		this.lastSave.set(path, now);
 		if (this.inFlight.has(path) && !this.dirtyDuringFlight.has(path)) {
 			this.dirtyDuringFlight.set(path, Date.now());
 		} else if (!this.dirtySince.has(path)) {
 			this.dirtySince.set(path, Date.now());
 			this.plugin.logger.debug(`dirty (${reason}): ${path}`);
 		}
-		this.schedule(path, this.plugin.data.settings.debounceSeconds * 1000);
+		this.schedule(path, this.nextDelay(path, now));
 		this.plugin.refreshUi();
+	}
+
+	/**
+	 * Debounce with a ceiling: wait `debounceSeconds` after the last save, but never let a
+	 * continuous editing session go more than `maxWaitSeconds` without publishing.
+	 */
+	private nextDelay(path: string, now: number): number {
+		const { debounceSeconds, maxWaitSeconds } = this.plugin.data.settings;
+		const debounce = debounceSeconds * 1000;
+		// While a request is in flight, the ceiling belongs to the session being published: just debounce.
+		if (this.inFlight.has(path)) return debounce;
+		const first = this.dirtySince.get(path) ?? now;
+		const ceiling = first + maxWaitSeconds * 1000 - now;
+		return Math.max(0, Math.min(debounce, ceiling));
 	}
 
 	schedule(path: string, delayMs: number) {
@@ -58,11 +76,14 @@ export class SyncEngine {
 		this.retries.delete(path);
 		this.rerun.delete(path);
 		this.dirtyDuringFlight.delete(path);
+		this.lastSave.delete(path);
 	}
 
 	rename(oldPath: string, newPath: string) {
 		const since = this.dirtySince.get(oldPath);
+		const saved = this.lastSave.get(oldPath);
 		this.cancel(oldPath);
+		if (saved !== undefined) this.lastSave.set(newPath, saved);
 		if (since !== undefined) {
 			this.dirtySince.set(newPath, since);
 			this.schedule(newPath, this.plugin.data.settings.debounceSeconds * 1000);
@@ -123,10 +144,13 @@ export class SyncEngine {
 				throw new ApiError(413, `Note is ${Math.round(payload.bytes / 1024)} KB; the pilot limit is ${MAX_NOTE_BYTES / 1000} KB.`);
 			}
 			const t0 = Date.now();
+			const savedAt = this.lastSave.get(path) ?? t0;
+			const burstStart = this.dirtySince.get(path) ?? savedAt;
 			const res = await plugin.api.publishVersion(rec.noteId, payload);
 			const now = Date.now();
 			const api = now - t0;
-			const sinceEdit = now - (this.dirtySince.get(path) ?? t0);
+			const sinceLastSave = now - savedAt;
+			const sinceFirstSave = now - burstStart;
 
 			// The record may have been renamed while the request was in flight.
 			const current = plugin.data.notes[path] ?? rec;
@@ -141,8 +165,9 @@ export class SyncEngine {
 			if (res.unchanged) {
 				plugin.logger.info(`server already had this content (v${res.version}): ${path}`);
 			} else {
-				plugin.recordLatency({ ts: now, sinceEdit, api, bytes: payload.bytes });
-				plugin.logger.info(`v${res.version} live — ${fmtMs(sinceEdit)} since save, API ${fmtMs(api)}: ${path}`);
+				plugin.recordLatency({ ts: now, sinceLastSave, sinceFirstSave, api, bytes: payload.bytes });
+				const burst = sinceFirstSave - sinceLastSave > 1000 ? ` (editing session ${fmtMs(sinceFirstSave)})` : "";
+				plugin.logger.info(`v${res.version} live — ${fmtMs(sinceLastSave)} after last save${burst}, API ${fmtMs(api)}: ${path}`);
 			}
 			await plugin.saveState();
 		} catch (e) {
@@ -171,7 +196,7 @@ export class SyncEngine {
 				if (!this.dirtySince.has(path)) this.dirtySince.set(path, this.dirtyDuringFlight.get(path)!);
 				this.dirtyDuringFlight.delete(path);
 			}
-			if (again) this.schedule(path, 500);
+			if (again) this.schedule(path, this.nextDelay(path, Date.now()));
 			plugin.refreshUi();
 		}
 	}

@@ -1,7 +1,7 @@
 /* Linvau pilot panel — uses Obsidian theme variables only */
 .linvau-log { padding: var(--size-4-3); font-size: var(--font-ui-small); }
 .linvau-log h4 { margin: var(--size-4-4) 0 var(--size-4-2); }
-.linvau-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--size-4-2); }
+.linvau-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: var(--size-4-2); }
 .linvau-stat { background: var(--background-secondary); border-radius: var(--radius-m); padding: var(--size-4-2); text-align: center; }
 .linvau-stat-value { font-size: var(--font-ui-large); font-weight: var(--font-semibold); }
 .linvau-stat-label, .linvau-muted { color: var(--text-muted); font-size: var(--font-ui-smaller); }

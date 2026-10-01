@@ -1,6 +1,6 @@
 {
   "name": "linvau-obsidian",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "private": true,
   "description": "Linvau plugin for Obsidian — pilot (M0 spike)",
   "main": "main.js",
@@ -17,8 +17,5 @@
     "obsidian": "^1.13.1",
     "tslib": "^2.8.0",
     "typescript": "^5.6.0"
-  },
-  "allowScripts": {
-    "esbuild@0.25.12": true
   }
 }
