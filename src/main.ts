@@ -36,11 +36,10 @@ export default class LinvauPlugin extends Plugin {
 		this.registerCommands();
 
 		this.registerEvent(this.app.workspace.on("file-menu", (menu: Menu, file: TAbstractFile) => {
-			if (!(file instanceof TFile) || file.extension !== "md") return;
-			const rec = this.data.notes[file.path];
-			menu.addItem((i) => i.setTitle(rec ? "Linvau: sync now" : "Linvau: publish note").setIcon("radio")
-				.onClick(() => void this.publish(file)));
-			if (rec) menu.addItem((i) => i.setTitle("Linvau: copy link").setIcon("link").onClick(() => void this.copyLink(rec)));
+			if (file instanceof TFile && file.extension === "md") this.addMenuItems(menu, file);
+		}));
+		this.registerEvent(this.app.workspace.on("editor-menu", (menu: Menu, _editor, info) => {
+			if (info.file instanceof TFile && info.file.extension === "md") this.addMenuItems(menu, info.file);
 		}));
 
 		this.registerEvent(this.app.workspace.on("file-open", () => this.refreshUi()));
@@ -207,13 +206,9 @@ export default class LinvauPlugin extends Plugin {
 		this.addCommand({ id: "resume-current", name: "Resume link of current note", icon: "play",
 			checkCallback: withActive((f) => void this.resume(f), true) });
 		this.addCommand({ id: "regenerate-current", name: "Regenerate link of current note (old link stops working)", icon: "rotate-ccw",
-			checkCallback: withActive((f) => this.confirm("Regenerate link?",
-				"The current link (and any QR code printed with it) will stop working immediately. A new link will be created.",
-				"Regenerate", () => void this.regenerate(f)), true) });
+			checkCallback: withActive((f) => this.confirmRegenerate(f), true) });
 		this.addCommand({ id: "unpublish-current", name: "Unpublish current note", icon: "x-circle",
-			checkCallback: withActive((f) => this.confirm("Unpublish note?",
-				"The link will stop working and all published versions will be removed from the pilot server. Your local note is not touched.",
-				"Unpublish", () => void this.unpublish(f)), true) });
+			checkCallback: withActive((f) => this.confirmUnpublish(f), true) });
 		this.addCommand({ id: "open-panel", name: "Open pilot panel", icon: "radio", callback: () => void this.openLogView() });
 		this.addCommand({ id: "sync-all", name: "Sync all published notes", icon: "refresh-cw", callback: () => this.syncAll() });
 		this.addCommand({ id: "copy-diagnostics", name: "Copy diagnostics to clipboard", icon: "clipboard-copy",
@@ -222,6 +217,49 @@ export default class LinvauPlugin extends Plugin {
 
 	private confirm(title: string, body: string, cta: string, fn: () => void) {
 		new ConfirmModal(this.app, title, body, cta, fn).open();
+	}
+
+	confirmRegenerate(f: TFile) {
+		this.confirm("Regenerate link?",
+			"The current link (and any QR code printed with it) will stop working immediately. A new link will be created.",
+			"Regenerate", () => void this.regenerate(f));
+	}
+
+	confirmUnpublish(f: TFile) {
+		this.confirm("Unpublish note?",
+			"The link will stop working and all published versions will be removed from the pilot server. Your local note is not touched.",
+			"Unpublish", () => void this.unpublish(f));
+	}
+
+	/** Context menu (file explorer, tab header and editor right-click). Options depend on the link state. */
+	private addMenuItems(menu: Menu, file: TFile) {
+		const rec = this.data.notes[file.path];
+		const add = (title: string, icon: string, fn: () => void, warning = false) =>
+			menu.addItem((i) => {
+				i.setSection("linvau").setTitle(title).setIcon(icon).onClick(fn);
+				if (warning) i.setWarning(true);
+			});
+
+		if (!rec) {
+			add("Linvau: publish note", "radio", () => void this.publish(file));
+			return;
+		}
+		// P8: the author sees which version is live right in the menu.
+		menu.addItem((i) => i.setSection("linvau").setTitle(`Linvau · v${rec.version} · ${rec.state.toLowerCase()} · ${ago(rec.lastSyncAt)}`)
+			.setIcon("info").setDisabled(true));
+
+		if (rec.state === "ORPHAN") {
+			add("Linvau: resume link", "play", () => void this.resume(file));
+		} else if (rec.state === "SUSPENDED") {
+			add("Linvau: copy link", "link", () => void this.copyLink(rec));
+			add("Linvau: resume link", "play", () => void this.resume(file));
+		} else {
+			add("Linvau: sync now", "refresh-cw", () => void this.publish(file));
+			add("Linvau: copy link", "link", () => void this.copyLink(rec));
+			add("Linvau: pause link", "pause", () => void this.suspend(file));
+		}
+		add("Linvau: regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
+		add("Linvau: unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
 	}
 
 	async publish(file: TFile) {
