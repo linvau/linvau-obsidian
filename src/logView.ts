@@ -107,6 +107,13 @@ export class LinvauLogView extends ItemView {
 				});
 				row.createSpan({ cls: "linvau-muted", text: ` v${n.version} · ${ago(n.lastSyncAt)}` });
 				if (n.lastError) row.createDiv({ cls: "linvau-error", text: n.lastError });
+				if (n.state === "ORPHAN" && !this.app.vault.getAbstractFileByPath(n.path)) {
+					const box = row.createDiv({ cls: "linvau-orphan" });
+					box.createSpan({ cls: "linvau-muted", text: "Local file deleted; link paused. Restore the file and resume, or remove the link: " });
+					const b = box.createEl("button", { text: "Unpublish" });
+					b.addClass("mod-warning");
+					b.addEventListener("click", () => this.plugin.confirmUnpublish({ path: n.path }));
+				}
 			}
 		}
 

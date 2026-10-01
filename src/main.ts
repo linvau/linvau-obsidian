@@ -225,7 +225,7 @@ export default class LinvauPlugin extends Plugin {
 			"Regenerate", () => void this.regenerate(f));
 	}
 
-	confirmUnpublish(f: TFile) {
+	confirmUnpublish(f: { path: string }) {
 		this.confirm("Unpublish note?",
 			"The link will stop working and all published versions will be removed from the pilot server. Your local note is not touched.",
 			"Unpublish", () => void this.unpublish(f));
@@ -354,7 +354,8 @@ export default class LinvauPlugin extends Plugin {
 		}
 	}
 
-	async unpublish(file: TFile) {
+	/** Works by path, so links whose local file was deleted (ORPHAN) can still be removed. */
+	async unpublish(file: { path: string }) {
 		const rec = this.data.notes[file.path];
 		if (!rec) return;
 		try {
