@@ -28,12 +28,19 @@ export interface LatencySample {
 	/** Round trip of the publish request alone. */
 	api: number;
 	bytes: number;
+	/**
+	 * Why this publish was not a normal "save → live" flow. Such samples are reported apart and
+	 * do not count toward the online sync SLA. Absent = normal online publish.
+	 */
+	cause?: "offline" | "retry" | "reconcile" | "legacy-outlier";
 }
 
 export interface PluginData {
 	settings: LinvauSettings;
 	notes: Record<string, NoteRecord>;
 	latencies: LatencySample[];
+	/** Last log lines, kept across restarts so diagnostics survive closing the app. Stays on the device. */
+	log?: { ts: number; level: "debug" | "info" | "warn" | "error"; msg: string }[];
 }
 
 export const DEFAULT_SETTINGS: LinvauSettings = {

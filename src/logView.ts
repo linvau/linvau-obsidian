@@ -45,10 +45,12 @@ export class LinvauLogView extends ItemView {
 		contentEl.addClass("linvau-log");
 
 		// ── Metrics
-		const samples = plugin.data.latencies;
+		const all = plugin.data.latencies;
+		const samples = all.filter((s) => !s.cause);
+		const delayed = all.filter((s) => s.cause);
 		const since = samples.map((s) => s.sinceLastSave);
 		const session = samples.map((s) => s.sinceFirstSave);
-		const api = samples.map((s) => s.api);
+		const api = all.map((s) => s.api);
 		const p95 = percentile(since, 95);
 
 		const metrics = contentEl.createDiv({ cls: "linvau-metrics" });
@@ -76,6 +78,16 @@ export class LinvauLogView extends ItemView {
 			cls: "linvau-muted",
 			text: `Includes the ${plugin.data.settings.debounceSeconds}s debounce (max ${plugin.data.settings.maxWaitSeconds}s while typing). Pending: ${plugin.sync.pendingCount()}. Online: ${navigator.onLine ? "yes" : "no"}.`,
 		});
+
+		if (delayed.length) {
+			const counts: Record<string, number> = {};
+			for (const d of delayed) counts[d.cause!] = (counts[d.cause!] ?? 0) + 1;
+			const max = Math.max(...delayed.map((d) => d.sinceLastSave));
+			metrics.createDiv({
+				cls: "linvau-muted",
+				text: `Not counted in the target — delayed publishes: ${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(", ")} (longest ${fmtMs(max)}).`,
+			});
+		}
 
 		const actions = metrics.createDiv({ cls: "linvau-actions" });
 		const btn = (label: string, icon: string, onClick: () => void) => {

@@ -23,6 +23,8 @@ export class SyncEngine {
 	private dirtyDuringFlight = new Map<string, number>();
 	/** Time of the most recent save — the SLA is measured from here ("I stopped editing" → readers see it). */
 	private lastSave = new Map<string, number>();
+	/** Notes whose next publish was delayed by something other than the debounce. */
+	private delayCause = new Map<string, "offline" | "retry" | "reconcile">();
 
 	constructor(private plugin: LinvauPlugin) {}
 
@@ -35,6 +37,7 @@ export class SyncEngine {
 		if (!rec || rec.state === "SUSPENDED" || rec.state === "ORPHAN") return;
 		const now = Date.now();
 		this.lastSave.set(path, now);
+		if (reason === "reconcile") this.delayCause.set(path, "reconcile");
 		if (this.inFlight.has(path) && !this.dirtyDuringFlight.has(path)) {
 			this.dirtyDuringFlight.set(path, Date.now());
 		} else if (!this.dirtySince.has(path)) {
@@ -77,6 +80,7 @@ export class SyncEngine {
 		this.rerun.delete(path);
 		this.dirtyDuringFlight.delete(path);
 		this.lastSave.delete(path);
+		this.delayCause.delete(path);
 	}
 
 	rename(oldPath: string, newPath: string) {
@@ -121,6 +125,7 @@ export class SyncEngine {
 			return;
 		}
 		if (!navigator.onLine) {
+			this.delayCause.set(path, "offline");
 			plugin.logger.warn(`offline — keeping changes pending: ${path}`);
 			plugin.refreshUi();
 			return;
@@ -138,6 +143,7 @@ export class SyncEngine {
 			if (payload.hash === rec.hash && rec.state === "ACTIVE") {
 				plugin.logger.debug(`no content change (hash equal), skipped: ${path}`);
 				this.settleDirty(path);
+				this.delayCause.delete(path);
 				return;
 			}
 			if (payload.bytes > MAX_NOTE_BYTES) {
@@ -161,13 +167,16 @@ export class SyncEngine {
 			delete current.lastError;
 			this.settleDirty(path);
 			this.retries.delete(path);
+			const cause = this.delayCause.get(path);
+			this.delayCause.delete(path);
 
 			if (res.unchanged) {
 				plugin.logger.info(`server already had this content (v${res.version}): ${path}`);
 			} else {
-				plugin.recordLatency({ ts: now, sinceLastSave, sinceFirstSave, api, bytes: payload.bytes });
+				plugin.recordLatency({ ts: now, sinceLastSave, sinceFirstSave, api, bytes: payload.bytes, ...(cause ? { cause } : {}) });
 				const burst = sinceFirstSave - sinceLastSave > 1000 ? ` (editing session ${fmtMs(sinceFirstSave)})` : "";
-				plugin.logger.info(`v${res.version} live — ${fmtMs(sinceLastSave)} after last save${burst}, API ${fmtMs(api)}: ${path}`);
+				const why = cause ? ` [delayed: ${cause}]` : "";
+				plugin.logger.info(`v${res.version} live — ${fmtMs(sinceLastSave)} after last save${burst}${why}, API ${fmtMs(api)}: ${path}`);
 			}
 			await plugin.saveState();
 		} catch (e) {
@@ -179,6 +188,7 @@ export class SyncEngine {
 			const attempt = (this.retries.get(path) ?? 0) + 1;
 			if (!permanent && attempt <= RETRY_DELAYS_MS.length) {
 				this.retries.set(path, attempt);
+				this.delayCause.set(path, "retry");
 				const delay = RETRY_DELAYS_MS[attempt - 1];
 				plugin.logger.warn(`publish failed (${msg}); retry ${attempt}/${RETRY_DELAYS_MS.length} in ${delay / 1000}s: ${path}`);
 				this.schedule(path, delay);

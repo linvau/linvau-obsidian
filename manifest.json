@@ -1,7 +1,7 @@
 {
   "id": "linvau",
   "name": "Linvau",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "minAppVersion": "1.5.7",
   "description": "Publish individual notes as live links that update as you write and can be paused or revoked at any time.",
   "author": "Linvau",

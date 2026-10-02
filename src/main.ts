@@ -19,6 +19,7 @@ export default class LinvauPlugin extends Plugin {
 
 	async onload() {
 		await this.loadState();
+		this.logger.entries = [...(this.data.log ?? [])];
 		this.logger.verbose = this.data.settings.verbose;
 		this.api = new LinvauApi(() => this.data.settings.apiBase, () => this.getToken());
 		this.sync = new SyncEngine(this);
@@ -61,6 +62,7 @@ export default class LinvauPlugin extends Plugin {
 	}
 
 	onunload() {
+		void this.saveState();
 		this.sync?.unload();
 	}
 
@@ -72,11 +74,18 @@ export default class LinvauPlugin extends Plugin {
 			settings: { ...DEFAULT_SETTINGS, ...(raw?.settings ?? {}) },
 			notes: raw?.notes ?? {},
 			// Samples from 0.0.1 measured from the first save of a session; they are not comparable.
-			latencies: (raw?.latencies ?? []).filter((l) => typeof (l as LatencySample).sinceLastSave === "number"),
+			latencies: (raw?.latencies ?? [])
+				.filter((l) => typeof (l as LatencySample).sinceLastSave === "number")
+				// Samples recorded before 0.0.5 had no cause. Anything slower than a minute cannot be a
+				// normal online publish (max wait is ≤ 120 s but applies to session length, not to this
+				// measure), so it is kept but reported apart instead of silently dropped.
+				.map((l) => (!l.cause && raw?.log === undefined && l.sinceLastSave > 60_000 ? { ...l, cause: "legacy-outlier" as const } : l)),
+			log: raw?.log ?? [],
 		};
 	}
 
 	async saveState() {
+		this.data.log = this.logger.entries.slice(-200);
 		await this.saveData(this.data);
 	}
 
@@ -386,9 +395,17 @@ export default class LinvauPlugin extends Plugin {
 	// ─────────────────────────────── Diagnostics (exported manually by the author; no telemetry)
 
 	async copyDiagnostics() {
-		const since = this.data.latencies.map((s) => s.sinceLastSave);
-		const session = this.data.latencies.map((s) => s.sinceFirstSave);
+		const normal = this.data.latencies.filter((s) => !s.cause);
+		const delayed = this.data.latencies.filter((s) => s.cause);
+		const since = normal.map((s) => s.sinceLastSave);
+		const session = normal.map((s) => s.sinceFirstSave);
 		const api = this.data.latencies.map((s) => s.api);
+		const byCause: Record<string, { count: number; max: number }> = {};
+		for (const d of delayed) {
+			const c = (byCause[d.cause!] ??= { count: 0, max: 0 });
+			c.count++;
+			c.max = Math.max(c.max, d.sinceLastSave);
+		}
 		const diag = {
 			generatedAt: new Date().toISOString(),
 			plugin: this.manifest.version,
@@ -402,6 +419,7 @@ export default class LinvauPlugin extends Plugin {
 				samples: since.length,
 				afterLastSaveP50: percentile(since, 50), afterLastSaveP95: percentile(since, 95), afterLastSaveMax: since.length ? Math.max(...since) : null,
 				sessionP95: percentile(session, 95),
+				delayedByCause: byCause,
 				apiP50: percentile(api, 50), apiP95: percentile(api, 95),
 			},
 			notes: Object.values(this.data.notes).map((n) => ({
