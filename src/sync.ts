@@ -1,4 +1,4 @@
-import { TFile } from "obsidian";
+import { Platform, TFile } from "obsidian";
 import type LinvauPlugin from "./main";
 import { ApiError } from "./api";
 import { buildPayload, errMsg, fmtMs } from "./util";
@@ -24,7 +24,7 @@ export class SyncEngine {
 	/** Time of the most recent save — the SLA is measured from here ("I stopped editing" → readers see it). */
 	private lastSave = new Map<string, number>();
 	/** Notes whose next publish was delayed by something other than the debounce. */
-	private delayCause = new Map<string, "offline" | "retry" | "reconcile">();
+	private delayCause = new Map<string, "offline" | "retry" | "reconcile" | "background">();
 
 	constructor(private plugin: LinvauPlugin) {}
 
@@ -55,6 +55,9 @@ export class SyncEngine {
 	private nextDelay(path: string, now: number): number {
 		const { debounceSeconds, maxWaitSeconds } = this.plugin.data.settings;
 		const debounce = debounceSeconds * 1000;
+		// Mobile systems suspend the app shortly after it goes to the background, so a debounce
+		// timer would not fire until the author comes back. Publish right away instead.
+		if (Platform.isMobile && activeDocument.visibilityState === "hidden") return 0;
 		// While a request is in flight, the ceiling belongs to the session being published: just debounce.
 		if (this.inFlight.has(path)) return debounce;
 		const first = this.dirtySince.get(path) ?? now;
@@ -92,6 +95,19 @@ export class SyncEngine {
 			this.dirtySince.set(newPath, since);
 			this.schedule(newPath, this.plugin.data.settings.debounceSeconds * 1000);
 		}
+	}
+
+	/** App went to the background (mobile): publish pending notes now, before the system suspends us. */
+	flushNow(reason: string) {
+		const paths = [...this.dirtySince.keys()];
+		if (!paths.length) return;
+		this.plugin.logger.info(`${reason}: publishing ${paths.length} pending note(s) immediately`);
+		paths.forEach((p) => this.schedule(p, 0));
+	}
+
+	/** App came back to the foreground: anything still pending was held by the system, not by us. */
+	markHeldInBackground() {
+		for (const p of this.dirtySince.keys()) if (!this.delayCause.has(p)) this.delayCause.set(p, "background");
 	}
 
 	flushAllPending(reason: string) {

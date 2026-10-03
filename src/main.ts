@@ -50,6 +50,16 @@ export default class LinvauPlugin extends Plugin {
 			this.sync.flushAllPending("online");
 		});
 		this.registerDomEvent(window, "offline", () => this.logger.warn("device went offline"));
+		this.registerDomEvent(activeDocument, "visibilitychange", () => {
+			if (!Platform.isMobile) return;
+			if (activeDocument.visibilityState === "hidden") {
+				this.sync.flushNow("app to background");
+				void this.saveState();
+			} else {
+				this.sync.markHeldInBackground();
+				this.sync.flushAllPending("app to foreground");
+			}
+		});
 
 		// Vault events are only registered after the layout is ready, so the initial vault
 		// indexing (which fires "create" for every file) is not mistaken for user edits.

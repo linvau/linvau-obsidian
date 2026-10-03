@@ -32,7 +32,7 @@ export interface LatencySample {
 	 * Why this publish was not a normal "save → live" flow. Such samples are reported apart and
 	 * do not count toward the online sync SLA. Absent = normal online publish.
 	 */
-	cause?: "offline" | "retry" | "reconcile" | "legacy-outlier";
+	cause?: "offline" | "retry" | "reconcile" | "background" | "legacy-outlier";
 }
 
 export interface PluginData {
