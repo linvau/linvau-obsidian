@@ -1,7 +1,7 @@
 import { Platform, TFile } from "obsidian";
 import type LinvauPlugin from "./main";
 import { ApiError } from "./api";
-import { buildPayload, errMsg, fmtMs } from "./util";
+import { errMsg, fmtMs } from "./util";
 import { MAX_NOTE_BYTES } from "./types";
 
 const RETRY_DELAYS_MS = [5_000, 15_000, 60_000];
@@ -24,7 +24,7 @@ export class SyncEngine {
 	/** Time of the most recent save — the SLA is measured from here ("I stopped editing" → readers see it). */
 	private lastSave = new Map<string, number>();
 	/** Notes whose next publish was delayed by something other than the debounce. */
-	private delayCause = new Map<string, "offline" | "retry" | "reconcile" | "background">();
+	private delayCause = new Map<string, "offline" | "retry" | "reconcile" | "background" | "upload">();
 
 	constructor(private plugin: LinvauPlugin) {}
 
@@ -155,7 +155,7 @@ export class SyncEngine {
 		this.inFlight.add(path);
 		plugin.refreshUi();
 		try {
-			const payload = await buildPayload(plugin.app, file);
+			const payload = await plugin.buildFor(file, rec);
 			if (payload.hash === rec.hash && rec.state === "ACTIVE") {
 				plugin.logger.debug(`no content change (hash equal), skipped: ${path}`);
 				this.settleDirty(path);
@@ -168,7 +168,26 @@ export class SyncEngine {
 			const t0 = Date.now();
 			const savedAt = this.lastSave.get(path) ?? t0;
 			const burstStart = this.dirtySince.get(path) ?? savedAt;
-			const res = await plugin.api.publishVersion(rec.noteId, payload);
+
+			// Attachments first: upload only the files the server does not have, then publish the
+			// version that refers to them. Readers never see a version with missing images.
+			let uploaded = 0;
+			if (payload.assets.length) {
+				const { missing } = await plugin.api.checkAssets(rec.noteId, payload.assets.map((a) => a.hash));
+				for (const h of missing) {
+					const ref = payload.assets.find((a) => a.hash === h)!;
+					const f = plugin.app.vault.getAbstractFileByPath(ref.path);
+					if (!(f instanceof TFile)) continue;
+					await plugin.api.putAsset(rec.noteId, ref.hash, ref.ext, await plugin.app.vault.readBinary(f));
+					uploaded += ref.bytes;
+				}
+				if (uploaded && !this.delayCause.has(path)) this.delayCause.set(path, "upload");
+			}
+
+			const res = await plugin.api.publishVersion(rec.noteId, {
+				title: payload.title, markdown: payload.markdown, hash: payload.hash,
+				assets: payload.assets.map((a) => a.hash), panel: payload.panel,
+			});
 			const now = Date.now();
 			const api = now - t0;
 			const sinceLastSave = now - savedAt;
@@ -192,7 +211,11 @@ export class SyncEngine {
 				plugin.recordLatency({ ts: now, sinceLastSave, sinceFirstSave, api, bytes: payload.bytes, ...(cause ? { cause } : {}) });
 				const burst = sinceFirstSave - sinceLastSave > 1000 ? ` (editing session ${fmtMs(sinceFirstSave)})` : "";
 				const why = cause ? ` [delayed: ${cause}]` : "";
-				plugin.logger.info(`v${res.version} live — ${fmtMs(sinceLastSave)} after last save${burst}${why}, API ${fmtMs(api)}: ${path}`);
+				const files = payload.assets.length
+					? `, ${payload.assets.length} attachment(s)${uploaded ? ` (${(uploaded / 1e6).toFixed(1)} MB uploaded)` : ""}`
+					: "";
+				const side = payload.panel.length ? `, panel ${payload.panel.length}` : "";
+				plugin.logger.info(`v${res.version} live — ${fmtMs(sinceLastSave)} after last save${burst}${why}, API ${fmtMs(api)}${files}${side}: ${path}`);
 			}
 			await plugin.saveState();
 		} catch (e) {

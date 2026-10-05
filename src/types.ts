@@ -10,6 +10,12 @@ export interface NoteRecord {
 	hash: string | null;
 	lastSyncAt: number | null;
 	lastError?: string;
+	/** Publish images and attachments embedded in the note. Default: true. */
+	assetsEnabled?: boolean;
+	/** Vault paths of embedded notes the author approved for this link. */
+	approvedEmbeds?: string[];
+	/** Embedded notes still waiting for approval (kept to notify only once and to show a count). */
+	pendingEmbeds?: string[];
 }
 
 export interface LinvauSettings {
@@ -32,7 +38,7 @@ export interface LatencySample {
 	 * Why this publish was not a normal "save → live" flow. Such samples are reported apart and
 	 * do not count toward the online sync SLA. Absent = normal online publish.
 	 */
-	cause?: "offline" | "retry" | "reconcile" | "background" | "legacy-outlier";
+	cause?: "offline" | "retry" | "reconcile" | "background" | "upload" | "legacy-outlier";
 }
 
 export interface PluginData {

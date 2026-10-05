@@ -1,4 +1,4 @@
-import { Menu, Notice, Platform, Plugin, TAbstractFile, TFile, WorkspaceLeaf, getFrontMatterInfo } from "obsidian";
+import { Menu, Notice, Platform, Plugin, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiError, LinvauApi } from "./api";
 import { Logger } from "./logger";
 import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
@@ -7,13 +7,19 @@ import { SyncEngine } from "./sync";
 import {
 	DEFAULT_SETTINGS, LatencySample, MAX_LATENCY_SAMPLES, NoteRecord, PluginData, TOKEN_KEY,
 } from "./types";
-import { ago, buildPayload, errMsg, fmtMs, percentile } from "./util";
+import { ago, errMsg, fmtMs, percentile } from "./util";
+import { ContentBuilder, type BuildOptions, type Payload } from "./content";
+import { EmbedsModal } from "./embedsModal";
 
 export default class LinvauPlugin extends Plugin {
 	data!: PluginData;
 	logger = new Logger();
 	api!: LinvauApi;
 	sync!: SyncEngine;
+	builder!: ContentBuilder;
+	/** note path → files its published content depends on (attachments, approved embedded notes). */
+	private deps = new Map<string, Set<string>>();
+	private lastSkipped = new Map<string, string>();
 	private statusEl: HTMLElement | null = null;
 	private uiQueued = false;
 
@@ -23,6 +29,7 @@ export default class LinvauPlugin extends Plugin {
 		this.logger.verbose = this.data.settings.verbose;
 		this.api = new LinvauApi(() => this.data.settings.apiBase, () => this.getToken());
 		this.sync = new SyncEngine(this);
+		this.builder = new ContentBuilder(this.app);
 
 		this.addSettingTab(new LinvauSettingTab(this.app, this));
 		this.registerView(LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => new LinvauLogView(leaf, this));
@@ -125,19 +132,28 @@ export default class LinvauPlugin extends Plugin {
 		const { vault, metadataCache } = this.app;
 
 		this.registerEvent(vault.on("modify", (f) => {
-			if (f instanceof TFile) this.sync.markDirty(f.path, "modify");
+			if (!(f instanceof TFile)) return;
+			this.sync.markDirty(f.path, "modify");
+			this.markDependents(f.path);
 		}));
 
 		// Fires after the metadata cache is updated (e.g. title property changed).
 		this.registerEvent(metadataCache.on("changed", (f) => this.sync.markDirty(f.path, "metadata")));
 
 		this.registerEvent(vault.on("rename", (f, oldPath) => {
+			this.markDependents(oldPath);
+			// Approvals follow the embedded note when it is renamed or moved.
+			for (const r of Object.values(this.data.notes)) {
+				const i = r.approvedEmbeds?.indexOf(oldPath) ?? -1;
+				if (i >= 0) r.approvedEmbeds![i] = f.path;
+			}
 			const rec = this.data.notes[oldPath];
 			if (!rec) return;
 			delete this.data.notes[oldPath];
 			rec.path = f.path;
 			this.data.notes[f.path] = rec;
 			this.sync.rename(oldPath, f.path);
+			this.deps.delete(oldPath);
 			this.logger.info(`renamed: ${oldPath} → ${f.path} (link unchanged)`);
 			void this.saveState();
 			this.api.updatePath(rec.noteId, f.path)
@@ -147,6 +163,7 @@ export default class LinvauPlugin extends Plugin {
 		}));
 
 		this.registerEvent(vault.on("delete", (f) => {
+			this.markDependents(f.path);
 			const rec = this.data.notes[f.path];
 			if (!rec) return;
 			this.sync.cancel(f.path);
@@ -169,6 +186,44 @@ export default class LinvauPlugin extends Plugin {
 		}));
 	}
 
+	/** A file that a published note shows (an image, an approved embedded note) changed: republish that note. */
+	private markDependents(path: string) {
+		for (const [notePath, files] of this.deps) {
+			if (files.has(path)) this.sync.markDirty(notePath, "dependency");
+		}
+	}
+
+	buildOptions(rec: Pick<NoteRecord, "assetsEnabled" | "approvedEmbeds">): BuildOptions {
+		return {
+			assetsEnabled: rec.assetsEnabled !== false,
+			approvedEmbeds: new Set(rec.approvedEmbeds ?? []),
+			publishedNoteId: (p) => {
+				const r = this.data.notes[p];
+				return r && (r.state === "ACTIVE" || r.state === "PUBLISHING") ? r.noteId : null;
+			},
+		};
+	}
+
+	/** Builds what will be published for a note and keeps the author informed about what is left out. */
+	async buildFor(file: TFile, rec: NoteRecord): Promise<Payload> {
+		const payload = await this.builder.build(file, this.buildOptions(rec));
+		this.deps.set(rec.path, new Set(payload.deps));
+
+		const known = new Set(rec.pendingEmbeds ?? []);
+		const fresh = payload.pendingEmbeds.filter((p) => !known.has(p));
+		rec.pendingEmbeds = payload.pendingEmbeds;
+		if (fresh.length) {
+			this.logger.warn(`${fresh.length} embedded note(s) not published until you approve them: ${rec.path}`);
+			this.notify(`Linvau: ${fresh.length} embedded note(s) in “${file.basename}” are not published. Right-click the note → “Embedded content…” to approve them.`);
+		}
+		const sig = payload.skipped.join(" | ");
+		if (sig && this.lastSkipped.get(rec.path) !== sig) {
+			payload.skipped.forEach((m) => this.logger.warn(`not published — ${m}`));
+		}
+		this.lastSkipped.set(rec.path, sig);
+		return payload;
+	}
+
 	/** Startup reconciliation: catch changes made while the plugin was not running (other devices, git, external editors). */
 	async reconcile() {
 		const t0 = Date.now();
@@ -186,7 +241,7 @@ export default class LinvauPlugin extends Plugin {
 			}
 			if (rec.state === "SUSPENDED" || rec.state === "ORPHAN") continue;
 			try {
-				const payload = await buildPayload(this.app, file);
+				const payload = await this.buildFor(file, rec);
 				if (payload.hash !== rec.hash || rec.state !== "ACTIVE") {
 					changed++;
 					this.sync.markDirty(rec.path, "reconcile");
@@ -228,6 +283,8 @@ export default class LinvauPlugin extends Plugin {
 			checkCallback: withActive((f) => this.confirmRegenerate(f), true) });
 		this.addCommand({ id: "unpublish-current", name: "Unpublish current note", icon: "x-circle",
 			checkCallback: withActive((f) => this.confirmUnpublish(f), true) });
+		this.addCommand({ id: "embedded-content", name: "Embedded content of current note…", icon: "layers",
+			checkCallback: withActive((f) => void this.openEmbeds(f), true) });
 		this.addCommand({ id: "open-panel", name: "Open pilot panel", icon: "radio", callback: () => void this.openLogView() });
 		this.addCommand({ id: "sync-all", name: "Sync all published notes", icon: "refresh-cw", callback: () => this.syncAll() });
 		this.addCommand({ id: "copy-diagnostics", name: "Copy diagnostics to clipboard", icon: "clipboard-copy",
@@ -276,6 +333,8 @@ export default class LinvauPlugin extends Plugin {
 			add("Linvau: sync now", "refresh-cw", () => void this.publish(file));
 			add("Linvau: copy link", "link", () => void this.copyLink(rec));
 			add("Linvau: pause link", "pause", () => void this.suspend(file));
+			const n = rec.pendingEmbeds?.length ?? 0;
+			add(`Linvau: embedded content…${n ? ` (${n} pending)` : ""}`, "layers", () => void this.openEmbeds(file));
 		}
 		add("Linvau: regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
 		add("Linvau: unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
@@ -294,17 +353,33 @@ export default class LinvauPlugin extends Plugin {
 			return;
 		}
 		try {
-			const raw = await this.app.vault.read(file);
-			const fm = getFrontMatterInfo(raw);
-			const title = file.basename;
-			const created = await this.api.createNote(file.path, title);
+			// Look at what the note contains before anything leaves the device.
+			const scan = await this.builder.build(file, this.buildOptions({}));
+			if (scan.assets.length || scan.pendingEmbeds.length || scan.panel.length || scan.skipped.length) {
+				new EmbedsModal(this.app, this, file, { assetsEnabled: true, approvedEmbeds: [] }, "publish",
+					(choice) => void this.createAndPublish(file, choice)).open();
+			} else {
+				await this.createAndPublish(file, { assetsEnabled: true, approvedEmbeds: [] });
+			}
+		} catch (e) {
+			this.logger.error(`publish failed: ${errMsg(e)}`);
+			new Notice(`Linvau: ${errMsg(e)}`);
+		}
+	}
+
+	private async createAndPublish(file: TFile, choice: { assetsEnabled: boolean; approvedEmbeds: string[] }) {
+		try {
+			const created = await this.api.createNote(file.path, file.basename);
 			const rec: NoteRecord = {
 				noteId: created.noteId, shareId: created.shareId, url: created.url, path: file.path,
 				state: "PUBLISHING", version: 0, hash: null, lastSyncAt: null,
+				assetsEnabled: choice.assetsEnabled, approvedEmbeds: choice.approvedEmbeds,
+				// Embeds the author just saw in the dialog and left unchecked need no second notice.
+				pendingEmbeds: (await this.builder.build(file, this.buildOptions(choice))).pendingEmbeds,
 			};
 			this.data.notes[file.path] = rec;
 			await this.saveState();
-			this.logger.info(`published new note (${fm.exists ? "properties stripped" : "no properties"}): ${file.path}`);
+			this.logger.info(`published new note: ${file.path}`);
 			this.sync.markDirty(file.path, "publish");
 			await this.sync.flush(file.path);
 			await this.copyLink(rec);
@@ -312,6 +387,22 @@ export default class LinvauPlugin extends Plugin {
 			this.logger.error(`publish failed: ${errMsg(e)}`);
 			new Notice(`Linvau: ${errMsg(e)}`);
 		}
+	}
+
+	/** Review what a published note brings along: attachments, embedded notes, side panel. */
+	async openEmbeds(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		new EmbedsModal(this.app, this, file,
+			{ assetsEnabled: rec.assetsEnabled !== false, approvedEmbeds: rec.approvedEmbeds ?? [] }, "manage",
+			(choice) => {
+				rec.assetsEnabled = choice.assetsEnabled;
+				rec.approvedEmbeds = choice.approvedEmbeds;
+				this.logger.info(`embedded content updated (${choice.approvedEmbeds.length} note(s) approved, attachments ${choice.assetsEnabled ? "on" : "off"}): ${file.path}`);
+				void this.saveState();
+				this.sync.markDirty(file.path, "embeds");
+				void this.sync.flush(file.path);
+			}).open();
 	}
 
 	async copyLink(rec: NoteRecord | undefined) {
@@ -434,6 +525,7 @@ export default class LinvauPlugin extends Plugin {
 			},
 			notes: Object.values(this.data.notes).map((n) => ({
 				path: n.path, state: n.state, version: n.version, lastSync: ago(n.lastSyncAt), lastError: n.lastError ?? null,
+				attachments: n.assetsEnabled !== false, approvedEmbeds: n.approvedEmbeds?.length ?? 0, pendingEmbeds: n.pendingEmbeds?.length ?? 0,
 			})),
 			log: this.logger.entries.slice(-200).map((e) => `${new Date(e.ts).toISOString()} ${e.level.toUpperCase()} ${e.msg}`),
 		};
@@ -504,6 +596,8 @@ export default class LinvauPlugin extends Plugin {
 		else if (rec.state === "ERROR") text = `Linvau · error · v${rec.version} live`;
 		else if (this.sync.isDirty(f.path)) text = `Linvau · v${rec.version} live · changes pending`;
 		else text = `Linvau · v${rec.version} · ${ago(rec.lastSyncAt)}`;
+		const pending = rec.pendingEmbeds?.length ?? 0;
+		if (pending && rec.state !== "ORPHAN") text += ` · ${pending} embed${pending > 1 ? "s" : ""} pending`;
 		this.statusEl.setText(text);
 		this.statusEl.setAttr("aria-label", rec.lastError ?? rec.url);
 	}

@@ -7,7 +7,7 @@ export class ApiError extends Error {
 }
 
 export interface CreatedNote { noteId: string; shareId: string; url: string; state: string; }
-export interface PublishedVersion { version: number; publishedAt: string; url: string; unchanged?: boolean; renderMs?: number; }
+export interface PublishedVersion { version: number; publishedAt: string; url: string; unchanged?: boolean; renderMs?: number; assets?: number; panel?: number; }
 export interface RemoteNote { noteId: string; shareId: string; url: string; state: string; version: number; hash: string | null; path: string; updatedAt: string; }
 
 export class LinvauApi {
@@ -48,8 +48,35 @@ export class LinvauApi {
 	createNote(path: string, title: string) { return this.call<CreatedNote>("POST", "/v1/notes", { path, title }); }
 	getNote(id: string) { return this.call<RemoteNote>("GET", `/v1/notes/${id}`); }
 	updatePath(id: string, path: string) { return this.call<{ ok: boolean }>("PATCH", `/v1/notes/${id}`, { path }); }
-	publishVersion(id: string, p: { title: string; markdown: string; hash: string }) {
+	publishVersion(id: string, p: { title: string; markdown: string; hash: string; assets: string[]; panel: unknown[] }) {
 		return this.call<PublishedVersion>("POST", `/v1/notes/${id}/versions`, p);
+	}
+	/** Which of these attachment hashes the server does not have yet. */
+	checkAssets(id: string, hashes: string[]) {
+		return this.call<{ missing: string[] }>("POST", `/v1/notes/${id}/assets/check`, { hashes });
+	}
+	async putAsset(id: string, hash: string, ext: string, data: ArrayBuffer): Promise<void> {
+		const base = this.getBase().replace(/\/+$/, "");
+		const token = this.getToken();
+		if (!base || !token) throw new ApiError(0, "API URL or token is not configured (Settings → Linvau).");
+		let res;
+		try {
+			res = await requestUrl({
+				url: `${base}/v1/notes/${id}/assets/${hash}?ext=${encodeURIComponent(ext)}`,
+				method: "PUT",
+				headers: { Authorization: `Bearer ${token}` },
+				contentType: "application/octet-stream",
+				body: data,
+				throw: false,
+			});
+		} catch (e) {
+			throw new ApiError(0, `Network error: ${e instanceof Error ? e.message : String(e)}`);
+		}
+		if (res.status >= 400) {
+			let msg = `HTTP ${res.status}`;
+			try { msg = (res.json as { error?: string }).error ?? msg; } catch { /* non-JSON body */ }
+			throw new ApiError(res.status, msg);
+		}
 	}
 	suspend(id: string) { return this.call<{ state: string }>("POST", `/v1/notes/${id}/suspend`); }
 	resume(id: string) { return this.call<{ state: string }>("POST", `/v1/notes/${id}/resume`); }

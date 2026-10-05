@@ -1,32 +1,3 @@
-import { App, getFrontMatterInfo, TFile } from "obsidian";
-
-export interface Payload {
-	title: string;
-	markdown: string;
-	hash: string;
-	bytes: number;
-}
-
-export async function sha256(text: string): Promise<string> {
-	const data = new TextEncoder().encode(text);
-	const digest = await crypto.subtle.digest("SHA-256", data);
-	return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-/**
- * Builds what will be published. Properties (frontmatter) are stripped on the device:
- * they never leave the vault (PRD: properties hidden by default).
- */
-export async function buildPayload(app: App, file: TFile): Promise<Payload> {
-	const raw = await app.vault.read(file);
-	const fm = getFrontMatterInfo(raw);
-	const markdown = fm.exists ? raw.slice(fm.contentStart) : raw;
-	const fmTitle = app.metadataCache.getFileCache(file)?.frontmatter?.title;
-	const title = typeof fmTitle === "string" && fmTitle.trim() ? fmTitle.trim() : file.basename;
-	const hash = await sha256(`${title}\n\u0000\n${markdown}`);
-	return { title, markdown, hash, bytes: new TextEncoder().encode(markdown).length };
-}
-
 export function ago(ts: number | null): string {
 	if (!ts) return "never";
 	const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
