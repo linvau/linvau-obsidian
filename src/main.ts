@@ -73,6 +73,7 @@ export default class LinvauPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.registerVaultEvents();
 			void this.reconcile();
+			void this.ensureLogView();
 		});
 
 		this.logger.info(`Linvau pilot ${this.manifest.version} loaded (${this.platformName()})`);
@@ -318,6 +319,7 @@ export default class LinvauPlugin extends Plugin {
 
 		if (!rec) {
 			add("Linvau: publish note", "radio", () => void this.publish(file));
+			add("Linvau: open pilot panel", "activity", () => void this.openLogView());
 			return;
 		}
 		// P8: the author sees which version is live right in the menu.
@@ -338,6 +340,7 @@ export default class LinvauPlugin extends Plugin {
 		}
 		add("Linvau: regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
 		add("Linvau: unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
+		add("Linvau: open pilot panel", "activity", () => void this.openLogView());
 	}
 
 	async publish(file: TFile) {
@@ -553,6 +556,16 @@ export default class LinvauPlugin extends Plugin {
 	}
 
 	// ─────────────────────────────── UI
+
+	/**
+	 * Keeps the pilot panel available in the right sidebar without opening it. On phones the
+	 * sidebar's view list is the main way to reach it, and a view only appears there once it exists.
+	 */
+	private async ensureLogView() {
+		if (this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE).length) return;
+		const leaf = this.app.workspace.getRightLeaf(false);
+		if (leaf) await leaf.setViewState({ type: LOG_VIEW_TYPE, active: false });
+	}
 
 	async openLogView() {
 		const existing = this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE)[0];
