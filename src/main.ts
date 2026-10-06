@@ -562,7 +562,12 @@ export default class LinvauPlugin extends Plugin {
 	 * sidebar's view list is the main way to reach it, and a view only appears there once it exists.
 	 */
 	private async ensureLogView() {
-		if (this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE).length) return;
+		// When the plugin is updated or re-enabled, a panel saved in the workspace takes a moment to
+		// come back. Checking too early would not see it and would add a second one.
+		await new Promise((r) => window.setTimeout(r, 2000));
+		const leaves = this.app.workspace.getLeavesOfType(LOG_VIEW_TYPE);
+		leaves.slice(1).forEach((l) => l.detach());   // also cleans up duplicates left by 0.1.1
+		if (leaves.length) return;
 		const leaf = this.app.workspace.getRightLeaf(false);
 		if (leaf) await leaf.setViewState({ type: LOG_VIEW_TYPE, active: false });
 	}

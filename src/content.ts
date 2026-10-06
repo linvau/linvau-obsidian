@@ -41,6 +41,8 @@ export interface BuildOptions {
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "svg"]);
 const FILE_EXT = new Set(["pdf", "mp3", "wav", "m4a", "ogg", "mp4", "webm", "mov"]);
+/** Camera formats that neither Obsidian nor browsers display. */
+const RAW_EXT = new Set(["dng", "heic", "heif", "raw", "cr2", "cr3", "nef", "arw", "orf", "rw2", "tif", "tiff"]);
 export const MAX_ASSET_BYTES = 10_000_000;
 const MAX_PANEL_ITEMS = 12;
 
@@ -206,7 +208,9 @@ export class ContentBuilder {
 				return `\n\n> [!embed] ${dest.basename}${heading}\n${quoted}\n\n`;
 			}
 
-			skipped.push(`${dest.name}: this file type cannot be published yet`);
+			skipped.push(RAW_EXT.has(ext)
+				? `${dest.name}: browsers cannot show this photo format (${ext.toUpperCase()}). Export it as JPG or PNG to publish it`
+				: `${dest.name}: this file type cannot be published yet`);
 			return PLACEHOLDER;
 		};
 
