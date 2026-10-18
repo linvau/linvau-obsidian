@@ -219,10 +219,13 @@ export class SyncEngine {
 			}
 			await plugin.saveState();
 		} catch (e) {
-			const msg = errMsg(e);
+			const status = e instanceof ApiError ? e.status : 0;
+			// 503 comes from the hosting platform when a publish exceeds its processing limits.
+			const msg = status === 503
+				? "the server could not process this note (HTTP 503) — it may be too large or too complex"
+				: errMsg(e);
 			rec.state = "ERROR";
 			rec.lastError = msg;
-			const status = e instanceof ApiError ? e.status : 0;
 			const permanent = status === 401 || status === 403 || status === 404 || status === 410 || status === 413;
 			const attempt = (this.retries.get(path) ?? 0) + 1;
 			if (!permanent && attempt <= RETRY_DELAYS_MS.length) {
