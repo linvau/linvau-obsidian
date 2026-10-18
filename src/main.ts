@@ -10,6 +10,7 @@ import {
 import { ago, errMsg, fmtMs, percentile } from "./util";
 import { ContentBuilder, type BuildOptions, type Payload } from "./content";
 import { EmbedsModal } from "./embedsModal";
+import { ExcalidrawSpike, isDrawing } from "./spikeExcalidraw";
 
 export default class LinvauPlugin extends Plugin {
 	data!: PluginData;
@@ -290,6 +291,18 @@ export default class LinvauPlugin extends Plugin {
 		this.addCommand({ id: "sync-all", name: "Sync all published notes", icon: "refresh-cw", callback: () => this.syncAll() });
 		this.addCommand({ id: "copy-diagnostics", name: "Copy diagnostics to clipboard", icon: "clipboard-copy",
 			callback: () => void this.copyDiagnostics() });
+
+		// M0 spike P-06 (path A). Pilot-only; removed after the spike.
+		const spike = new ExcalidrawSpike(this.app, (level, msg) => this.logger[level](msg), this.manifest.version);
+		this.addCommand({ id: "spike-excalidraw-current", name: "Spike: Excalidraw export test (current drawing)", icon: "flask-conical",
+			checkCallback: (checking: boolean) => {
+				const f = this.app.workspace.getActiveFile();
+				if (!f || !isDrawing(this.app, f)) return false;
+				if (!checking) void spike.run([f]);
+				return true;
+			} });
+		this.addCommand({ id: "spike-excalidraw-folder", name: "Spike: Excalidraw export test (all drawings in \"Linvau spike\" folder)", icon: "flask-conical",
+			callback: () => void spike.run(spike.drawingsInSpikeFolder()) });
 	}
 
 	private confirm(title: string, body: string, cta: string, fn: () => void) {
