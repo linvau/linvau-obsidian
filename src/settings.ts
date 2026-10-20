@@ -29,14 +29,47 @@ export class LinvauSettingTab extends PluginSettingTab {
 						await this.plugin.saveState();
 					}));
 
-		new Setting(containerEl)
-			.setName("Pilot token")
-			.setDesc("Stored in this device’s local storage, never in the vault, so it does not travel with Obsidian Sync or git. Enter it on each device.")
-			.addText((t) => {
-				t.inputEl.type = "password";
-				t.setPlaceholder(this.plugin.getToken() ? "•••••••• (set)" : "Paste token")
-					.onChange((v) => this.plugin.setToken(v.trim() || null));
-			});
+		new Setting(containerEl).setName("Account").setHeading();
+		const session = this.plugin.session;
+		if (session.connected) {
+			new Setting(containerEl)
+				.setName(`Connected as ${session.email}`)
+				.setDesc(`This device: ${session.deviceName}. The session is kept in this device's local storage, never in the vault.`)
+				.addButton((b) => b.setButtonText("Disconnect this device").setWarning().onClick(() => {
+					this.plugin.confirmDisconnect();
+				}));
+			new Setting(containerEl)
+				.setName("Connected devices")
+				.setDesc("Devices where this account is connected. Disconnect one you lost or no longer use.")
+				.addButton((b) => b.setButtonText("Show").onClick(async () => {
+					try {
+						const { devices } = await this.plugin.api.devices();
+						const list = this.containerEl.querySelector(".linvau-devices") ?? this.containerEl.createDiv({ cls: "linvau-devices" });
+						list.empty();
+						for (const d of devices) {
+							new Setting(list as HTMLElement)
+								.setName(`${d.name}${d.current ? " (this device)" : ""}`)
+								.setDesc(`Last active ${new Date(d.lastSeenAt).toLocaleString()}`)
+								.addButton((x) => x.setButtonText("Disconnect").setDisabled(d.current).onClick(async () => {
+									try {
+										await this.plugin.api.removeDevice(d.id);
+										new Notice(`Linvau: “${d.name}” disconnected.`);
+										this.display();
+									} catch (e) { new Notice(`Linvau: ${errMsg(e)}`); }
+								}));
+						}
+					} catch (e) {
+						new Notice(`Linvau: ${errMsg(e)}`);
+					}
+				}));
+		} else {
+			new Setting(containerEl)
+				.setName("Not connected")
+				.setDesc("Publishing needs a free Linvau account. We send a 6-digit code to your email; no password.")
+				.addButton((b) => b.setButtonText("Connect").setCta().onClick(async () => {
+					if (await this.plugin.ensureConnected()) this.display();
+				}));
+		}
 
 		new Setting(containerEl)
 			.setName("Test connection")
@@ -44,8 +77,12 @@ export class LinvauSettingTab extends PluginSettingTab {
 				b.setButtonText("Test").onClick(async () => {
 					try {
 						const h = await this.plugin.api.health();
+						if (!session.connected) {
+							new Notice(`Linvau: server ${h.service} ${h.version} reachable. This device is not connected yet.`);
+							return;
+						}
 						const me = await this.plugin.api.me();
-						new Notice(`Linvau: connected to ${h.service} ${h.version} as ${me.owner}.`);
+						new Notice(`Linvau: connected to ${h.service} ${h.version} as ${me.user?.email ?? me.owner}.`);
 						this.plugin.logger.info(`connection OK (${h.service} ${h.version})`);
 					} catch (e) {
 						new Notice(`Linvau: ${errMsg(e)}`);

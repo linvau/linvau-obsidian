@@ -1,6 +1,6 @@
 import { Platform, TFile } from "obsidian";
 import type LinvauPlugin from "./main";
-import { ApiError } from "./api";
+import { ApiError, isAuthLost } from "./api";
 import { errMsg, fmtMs } from "./util";
 import { MAX_NOTE_BYTES } from "./types";
 
@@ -226,6 +226,14 @@ export class SyncEngine {
 				: errMsg(e);
 			rec.state = "ERROR";
 			rec.lastError = msg;
+			if (isAuthLost(e)) {
+				// No session on this device: keep the note pending and wait for the author to connect.
+				this.retries.delete(path);
+				plugin.logger.warn(`not published, device not connected: ${path}`);
+				plugin.onAuthLost((e as ApiError).code);
+				await plugin.saveState();
+				return;
+			}
 			const permanent = status === 401 || status === 403 || status === 404 || status === 410 || status === 413;
 			const attempt = (this.retries.get(path) ?? 0) + 1;
 			if (!permanent && attempt <= RETRY_DELAYS_MS.length) {

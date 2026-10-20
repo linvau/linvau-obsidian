@@ -8,7 +8,9 @@ Linvau publishes individual notes as live links: you choose a note, get a link, 
 
 - **Network use:** only notes you explicitly publish are sent to the Linvau server configured in settings (pilot: a private Cloudflare Worker). Nothing else in your vault is read or uploaded.
 - **Properties (frontmatter) are stripped on your device** and never uploaded.
-- **Account:** the pilot uses a single access token, stored in this device's local storage (not in the vault).
+- **Account required to publish:** the first time you publish, the plugin asks for your email and sends you a 6-digit code (no password). Installing and exploring the plugin needs no account; readers of your links never need one.
+- **What is stored on the device:** this device's session (a renewable token), in Obsidian's local storage for this vault — never in the vault, so it does not travel with sync or git.
+- **Email:** login codes are sent by Linvau through Cloudflare Email Service from `notify.linvau.com`.
 - **No telemetry.** The pilot panel keeps a local log; you can copy it manually with "Copy diagnostics".
 
 ## Commands
@@ -20,6 +22,8 @@ Linvau publishes individual notes as live links: you choose a note, get a link, 
 | Pause / Resume link | Readers see "paused" immediately; same link and QR on resume |
 | Regenerate link | Old link stops working (410); a new one is created |
 | Unpublish current note | Removes the link and all versions from the server |
+| Connect this device | Asks for your email and the 6-digit code we send you. Also opens by itself on your first publish |
+| Disconnect this device | Ends this device's session. Your links stay online |
 | Open pilot panel | Sync latency P50/P95, published notes, event log |
 | Copy diagnostics | Copies a JSON report (no note content) |
 | Spike: Excalidraw export test | M0 spike P-06 (temporary). Exports the drawings in the `Linvau spike` folder to SVG/PNG through the Excalidraw plugin and writes a timing report to `Linvau spike/reports`. Writes only inside that folder; sends nothing over the network |

@@ -1,21 +1,26 @@
 import { Menu, Notice, Platform, Plugin, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
-import { ApiError, LinvauApi } from "./api";
+import { ApiError, LinvauApi, isAuthLost } from "./api";
 import { Logger } from "./logger";
 import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
 import { ConfirmModal, LinvauSettingTab } from "./settings";
 import { SyncEngine } from "./sync";
 import {
-	DEFAULT_SETTINGS, LatencySample, MAX_LATENCY_SAMPLES, NoteRecord, PluginData, TOKEN_KEY,
+	DEFAULT_SETTINGS, LatencySample, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
 } from "./types";
 import { ago, errMsg, fmtMs, percentile } from "./util";
 import { ContentBuilder, type BuildOptions, type Payload } from "./content";
 import { EmbedsModal } from "./embedsModal";
 import { ExcalidrawSpike, isDrawing } from "./spikeExcalidraw";
+import { LEGACY_TOKEN_KEY, Session } from "./session";
+import { ConnectModal, connectedNotice } from "./connectModal";
 
 export default class LinvauPlugin extends Plugin {
 	data!: PluginData;
 	logger = new Logger();
 	api!: LinvauApi;
+	session!: Session;
+	private connecting: Promise<boolean> | null = null;
+	private authLostNotified = false;
 	sync!: SyncEngine;
 	builder!: ContentBuilder;
 	/** note path → files its published content depends on (attachments, approved embedded notes). */
@@ -28,7 +33,15 @@ export default class LinvauPlugin extends Plugin {
 		await this.loadState();
 		this.logger.entries = [...(this.data.log ?? [])];
 		this.logger.verbose = this.data.settings.verbose;
-		this.api = new LinvauApi(() => this.data.settings.apiBase, () => this.getToken());
+		this.api = new LinvauApi(() => this.data.settings.apiBase);
+		this.session = new Session(this.app, this.api, (level, msg) => this.logger[level](msg));
+		this.api.tokens = this.session;
+		this.register(this.session.onChange(() => this.refreshUi()));
+		// 0.1.5: the fixed pilot token is replaced by an account; remove it from this device.
+		if (this.app.loadLocalStorage(LEGACY_TOKEN_KEY)) {
+			this.app.saveLocalStorage(LEGACY_TOKEN_KEY, null);
+			this.logger.info("pilot token removed from this device; connect with your email to publish");
+		}
 		this.sync = new SyncEngine(this);
 		this.builder = new ContentBuilder(this.app);
 
@@ -108,13 +121,58 @@ export default class LinvauPlugin extends Plugin {
 		await this.saveData(this.data);
 	}
 
-	getToken(): string | null {
-		const t = this.app.loadLocalStorage(TOKEN_KEY) as unknown;
-		return typeof t === "string" && t ? t : null;
+	// ─────────────────────────────── Account (PRD 2.4: account at the first publish, login with an emailed code)
+
+	/** Resolves true when this device has a session, asking the author to connect if needed. */
+	ensureConnected(reason: string | null = null): Promise<boolean> {
+		if (this.session.connected) return Promise.resolve(true);
+		if (!this.data.settings.apiBase) {
+			new Notice("Linvau: set the API URL first (Settings → Linvau).");
+			return Promise.resolve(false);
+		}
+		if (this.connecting) return this.connecting;
+		this.connecting = new Promise<boolean>((resolve) => {
+			new ConnectModal(this.app, this.api, this.deviceInfo(), reason, (r) => {
+				this.connecting = null;
+				if (!r) { resolve(false); return; }
+				this.session.start(r);
+				this.authLostNotified = false;
+				this.logger.info(`connected this device (${r.device.name})${r.claimedNotes ? `; ${r.claimedNotes} pilot note(s) moved to the account` : ""}`);
+				connectedNotice(r);
+				// Notes that could not sync while disconnected go out now.
+				this.syncAll();
+				resolve(true);
+			}).open();
+		});
+		return this.connecting;
 	}
 
-	setToken(token: string | null) {
-		this.app.saveLocalStorage(TOKEN_KEY, token);
+	confirmDisconnect() {
+		if (!this.session.connected) { new Notice("Linvau: this device is not connected."); return; }
+		this.confirm("Disconnect this device?",
+			"Links you published stay online. This device stops syncing until you connect it again.",
+			"Disconnect", () => void this.disconnect());
+	}
+
+	async disconnect() {
+		try { await this.api.logout(); } catch (e) { this.logger.warn(`logout request failed (${errMsg(e)}); the session is removed from this device anyway`); }
+		this.session.clear("disconnected by the author");
+		new Notice("Linvau: this device is disconnected.");
+	}
+
+	/** Called by the sync engine when the server says this device has no valid session. */
+	onAuthLost(code?: string) {
+		// The server no longer accepts this device: forget the session so the UI shows "not connected".
+		if (code && code !== "not_connected") this.session.clear(code);
+		if (this.authLostNotified) return;
+		this.authLostNotified = true;
+		this.notify("Linvau: this device is no longer connected, so changes are not being published. Run “Linvau: Connect this device”.");
+	}
+
+	deviceInfo(): { name: string; platform: string; lang: string } {
+		const platform = Platform.isIosApp ? "ios" : Platform.isAndroidApp ? "android" : Platform.isMacOS ? "macos" : Platform.isWin ? "windows" : Platform.isLinux ? "linux" : "unknown";
+		const lang = (window.localStorage.getItem("language") || navigator.language || "en").slice(0, 2);
+		return { name: `${this.platformName()} · ${this.app.vault.getName()}`.slice(0, 60), platform, lang };
 	}
 
 	recordLatency(s: LatencySample) {
@@ -231,6 +289,10 @@ export default class LinvauPlugin extends Plugin {
 		const t0 = Date.now();
 		const recs = Object.values(this.data.notes);
 		if (!recs.length) return;
+		if (!this.session.connected) {
+			this.logger.warn("reconcile skipped: this device is not connected to Linvau");
+			return;
+		}
 		let changed = 0, missing = 0, drift = 0;
 		for (const [i, rec] of recs.entries()) {
 			const file = this.app.vault.getAbstractFileByPath(rec.path);
@@ -289,6 +351,10 @@ export default class LinvauPlugin extends Plugin {
 			checkCallback: withActive((f) => void this.openEmbeds(f), true) });
 		this.addCommand({ id: "open-panel", name: "Open pilot panel", icon: "radio", callback: () => void this.openLogView() });
 		this.addCommand({ id: "sync-all", name: "Sync all published notes", icon: "refresh-cw", callback: () => this.syncAll() });
+		this.addCommand({ id: "connect", name: "Connect this device", icon: "log-in",
+			callback: () => void this.ensureConnected() });
+		this.addCommand({ id: "disconnect", name: "Disconnect this device", icon: "log-out",
+			callback: () => this.confirmDisconnect() });
 		this.addCommand({ id: "copy-diagnostics", name: "Copy diagnostics to clipboard", icon: "clipboard-copy",
 			callback: () => void this.copyDiagnostics() });
 
@@ -357,6 +423,7 @@ export default class LinvauPlugin extends Plugin {
 	}
 
 	async publish(file: TFile) {
+		if (!(await this.ensureConnected("Publishing needs a free Linvau account."))) return;
 		const existing = this.data.notes[file.path];
 		if (existing && existing.state !== "ORPHAN") {
 			if (existing.state === "SUSPENDED") {
@@ -530,7 +597,7 @@ export default class LinvauPlugin extends Plugin {
 			online: navigator.onLine,
 			settings: {
 				apiBase: this.data.settings.apiBase, debounceSeconds: this.data.settings.debounceSeconds,
-				maxWaitSeconds: this.data.settings.maxWaitSeconds, tokenSet: !!this.getToken(),
+				maxWaitSeconds: this.data.settings.maxWaitSeconds, connected: this.session.connected,
 			},
 			latency: {
 				samples: since.length,
@@ -621,7 +688,8 @@ export default class LinvauPlugin extends Plugin {
 		}
 		this.statusEl.toggle(true);
 		let text: string;
-		if (this.sync.isInFlight(f.path)) text = "Linvau · publishing…";
+		if (!this.session.connected) text = `Linvau · not connected · v${rec.version} live`;
+		else if (this.sync.isInFlight(f.path)) text = "Linvau · publishing…";
 		else if (rec.state === "SUSPENDED") text = `Linvau · paused · v${rec.version}`;
 		else if (rec.state === "ORPHAN") text = "Linvau · file was deleted · link paused";
 		else if (rec.state === "ERROR") text = `Linvau · error · v${rec.version} live`;

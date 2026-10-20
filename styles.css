@@ -26,3 +26,19 @@
 .linvau-entry.level-debug { color: var(--text-faint); }
 .linvau-time { color: var(--text-faint); }
 .linvau-orphan { margin-top: var(--size-4-1); display: flex; flex-wrap: wrap; gap: var(--size-4-2); align-items: center; }
+
+/* 0.1.5: Connect to Linvau */
+.linvau-connect .linvau-code-input {
+	width: 100%;
+	font-size: 2em;
+	font-family: var(--font-monospace);
+	letter-spacing: 0.4em;
+	text-align: center;
+	padding: 0.3em;
+	margin: 0.5em 0;
+}
+.linvau-connect .linvau-connect-error {
+	min-height: 1.4em;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}

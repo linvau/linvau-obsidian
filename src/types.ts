@@ -58,4 +58,3 @@ export const DEFAULT_SETTINGS: LinvauSettings = {
 
 export const MAX_LATENCY_SAMPLES = 500;
 export const MAX_NOTE_BYTES = 1_000_000;
-export const TOKEN_KEY = "linvau-token";
