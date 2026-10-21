@@ -26,7 +26,6 @@ Linvau publishes individual notes as live links: you choose a note, get a link, 
 | Disconnect this device | Ends this device's session. Your links stay online |
 | Open pilot panel | Sync latency P50/P95, published notes, event log |
 | Copy diagnostics | Copies a JSON report (no note content) |
-| Spike: Excalidraw export test | M0 spike P-06 (temporary). Exports the drawings in the `Linvau spike` folder to SVG/PNG through the Excalidraw plugin and writes a timing report to `Linvau spike/reports`. Writes only inside that folder; sends nothing over the network |
 
 ## Development
 

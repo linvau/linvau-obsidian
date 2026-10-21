@@ -10,7 +10,6 @@ import {
 import { ago, errMsg, fmtMs, percentile } from "./util";
 import { ContentBuilder, type BuildOptions, type Payload } from "./content";
 import { EmbedsModal } from "./embedsModal";
-import { ExcalidrawSpike, isDrawing } from "./spikeExcalidraw";
 import { LEGACY_TOKEN_KEY, Session } from "./session";
 import { ConnectModal, connectedNotice } from "./connectModal";
 
@@ -21,6 +20,7 @@ export default class LinvauPlugin extends Plugin {
 	session!: Session;
 	private connecting: Promise<boolean> | null = null;
 	private authLostNotified = false;
+	private lastNotConnectedHint = 0;
 	sync!: SyncEngine;
 	builder!: ContentBuilder;
 	/** note path → files its published content depends on (attachments, approved embedded notes). */
@@ -64,7 +64,10 @@ export default class LinvauPlugin extends Plugin {
 			if (info.file instanceof TFile && info.file.extension === "md") this.addMenuItems(menu, info.file);
 		}));
 
-		this.registerEvent(this.app.workspace.on("file-open", () => this.refreshUi()));
+		this.registerEvent(this.app.workspace.on("file-open", (f) => {
+			this.refreshUi();
+			this.hintIfNotConnected(f);
+		}));
 		this.registerInterval(window.setInterval(() => this.refreshUi(), 30_000));
 		this.registerDomEvent(window, "online", () => {
 			this.logger.info("back online");
@@ -167,6 +170,19 @@ export default class LinvauPlugin extends Plugin {
 		if (this.authLostNotified) return;
 		this.authLostNotified = true;
 		this.notify("Linvau: this device is no longer connected, so changes are not being published. Run “Linvau: Connect this device”.");
+	}
+
+	/**
+	 * Mobile has no status bar: when a published note is opened on a device without a session,
+	 * say so (at most every 10 minutes) so edits are not silently left unpublished.
+	 */
+	private hintIfNotConnected(f: TFile | null) {
+		if (!f || this.session.connected || !this.data.notes[f.path]) return;
+		const rec = this.data.notes[f.path];
+		if (rec.state === "SUSPENDED" || rec.state === "ORPHAN") return;
+		if (Date.now() - this.lastNotConnectedHint < 10 * 60_000) return;
+		this.lastNotConnectedHint = Date.now();
+		new Notice("Linvau: this device is not connected, so edits to this note are not published. Run “Linvau: Connect this device”.", 8000);
 	}
 
 	deviceInfo(): { name: string; platform: string; lang: string } {
@@ -357,18 +373,6 @@ export default class LinvauPlugin extends Plugin {
 			callback: () => this.confirmDisconnect() });
 		this.addCommand({ id: "copy-diagnostics", name: "Copy diagnostics to clipboard", icon: "clipboard-copy",
 			callback: () => void this.copyDiagnostics() });
-
-		// M0 spike P-06 (path A). Pilot-only; removed after the spike.
-		const spike = new ExcalidrawSpike(this.app, (level, msg) => this.logger[level](msg), this.manifest.version);
-		this.addCommand({ id: "spike-excalidraw-current", name: "Spike: Excalidraw export test (current drawing)", icon: "flask-conical",
-			checkCallback: (checking: boolean) => {
-				const f = this.app.workspace.getActiveFile();
-				if (!f || !isDrawing(this.app, f)) return false;
-				if (!checking) void spike.run([f]);
-				return true;
-			} });
-		this.addCommand({ id: "spike-excalidraw-folder", name: "Spike: Excalidraw export test (all drawings in \"Linvau spike\" folder)", icon: "flask-conical",
-			callback: () => void spike.run(spike.drawingsInSpikeFolder()) });
 	}
 
 	private confirm(title: string, body: string, cta: string, fn: () => void) {

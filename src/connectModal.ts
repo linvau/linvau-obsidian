@@ -58,12 +58,19 @@ export class ConnectModal extends Modal {
 			t.setPlaceholder("you@example.com").setValue(prefill);
 		});
 		const err = this.errorLine();
+		let sendBtn!: HTMLButtonElement;
+		const setBusy = (on: boolean) => {
+			this.busy = on;
+			sendBtn.disabled = on;
+			input.disabled = on;
+			sendBtn.setText(on ? "Sending…" : "Send code");
+		};
 		const send = async () => {
 			if (this.busy) return;
 			const email = input.value.trim();
 			if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { err.setText("Enter a valid email address."); return; }
-			this.busy = true;
-			err.setText("Sending…");
+			setBusy(true);
+			err.setText("");
 			try {
 				const r = await this.api.requestCode(email, this.device.lang);
 				this.email = email;
@@ -79,10 +86,11 @@ export class ConnectModal extends Modal {
 					err.setText(errMsg(e));
 				}
 			} finally {
-				this.busy = false;
+				// The step may already have changed (success): only restore controls that are still on screen.
+				if (sendBtn.isConnected) setBusy(false); else this.busy = false;
 			}
 		};
-		new Setting(contentEl).addButton((b) => b.setButtonText("Send code").setCta().onClick(() => void send()));
+		new Setting(contentEl).addButton((b) => { sendBtn = b.buttonEl; b.setButtonText("Send code").setCta().onClick(() => void send()); });
 		input.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); void send(); } });
 		window.setTimeout(() => input.focus(), 50);
 	}
@@ -101,11 +109,29 @@ export class ConnectModal extends Modal {
 			attr: { type: "text", inputmode: "numeric", autocomplete: "one-time-code", maxlength: "6", placeholder: "000000", "aria-label": "6-digit code" },
 		});
 		const err = this.errorLine();
+		let resendBtn!: HTMLButtonElement;
+		let connectBtn!: HTMLButtonElement;
+		let otherBtn!: HTMLButtonElement;
+		const tick = () => {
+			if (!resendBtn) return;
+			if (this.busy) { resendBtn.disabled = true; return; }
+			const left = Math.ceil((this.resendAt - Date.now()) / 1000);
+			resendBtn.disabled = left > 0;
+			resendBtn.setText(left > 0 ? `Resend code (${left}s)` : "Resend code");
+		};
+		const setBusy = (on: boolean, label?: string) => {
+			this.busy = on;
+			input.disabled = on;
+			connectBtn.disabled = on;
+			otherBtn.disabled = on;
+			connectBtn.setText(on && label === "connect" ? "Connecting…" : "Connect");
+			tick();
+		};
 		const verify = async () => {
 			const code = input.value.replace(/\D/g, "");
 			if (code.length !== 6 || this.busy) return;
-			this.busy = true;
-			err.setText("Connecting…");
+			setBusy(true, "connect");
+			err.setText("");
 			try {
 				const r = await this.api.verifyCode(this.email, code, this.device.name, this.device.platform);
 				this.done = true;
@@ -120,8 +146,7 @@ export class ConnectModal extends Modal {
 					err.setText(errMsg(e));
 				}
 			} finally {
-				this.busy = false;
-				input.focus();
+				if (input.isConnected) { setBusy(false); input.focus(); } else this.busy = false;
 			}
 		};
 		input.addEventListener("input", () => {
@@ -130,14 +155,14 @@ export class ConnectModal extends Modal {
 		});
 
 		const row = new Setting(contentEl);
-		let resendBtn!: HTMLButtonElement;
-		row.addButton((b) => b.setButtonText("Use another email").onClick(() => this.showEmailStep()));
+		row.addButton((b) => { otherBtn = b.buttonEl; b.setButtonText("Use another email").onClick(() => { if (!this.busy) this.showEmailStep(); }); });
 		row.addButton((b) => {
 			resendBtn = b.buttonEl;
 			b.onClick(async () => {
 				if (Date.now() < this.resendAt || this.busy) return;
-				this.busy = true;
-				err.setText("Sending a new code…");
+				setBusy(true, "resend");
+				resendBtn.setText("Sending…");
+				err.setText("");
 				try {
 					const r = await this.api.requestCode(this.email, this.device.lang);
 					this.resendAt = Date.now() + r.resendAfter * 1000;
@@ -146,17 +171,12 @@ export class ConnectModal extends Modal {
 					if (e instanceof ApiError && e.retryAfter) this.resendAt = Date.now() + e.retryAfter * 1000;
 					err.setText(errMsg(e));
 				} finally {
-					this.busy = false;
+					setBusy(false);
 				}
 			});
 		});
-		row.addButton((b) => b.setButtonText("Connect").setCta().onClick(() => void verify()));
+		row.addButton((b) => { connectBtn = b.buttonEl; b.setButtonText("Connect").setCta().onClick(() => void verify()); });
 
-		const tick = () => {
-			const left = Math.ceil((this.resendAt - Date.now()) / 1000);
-			resendBtn.disabled = left > 0;
-			resendBtn.setText(left > 0 ? `Resend code (${left}s)` : "Resend code");
-		};
 		tick();
 		if (this.timer !== null) window.clearInterval(this.timer);
 		this.timer = window.setInterval(tick, 1000);

@@ -44,6 +44,16 @@ export class LinvauLogView extends ItemView {
 		contentEl.empty();
 		contentEl.addClass("linvau-log");
 
+		// ── Account (visible on mobile, where there is no status bar)
+		const acct = contentEl.createDiv({ cls: `linvau-account ${plugin.session.connected ? "is-ok" : "is-bad"}` });
+		if (plugin.session.connected) {
+			acct.createSpan({ text: `Connected as ${plugin.session.email}` });
+		} else {
+			acct.createSpan({ text: "Not connected — edits are not published." });
+			const btn = acct.createEl("button", { text: "Connect", cls: "mod-cta" });
+			btn.addEventListener("click", () => void plugin.ensureConnected());
+		}
+
 		// ── Metrics
 		const all = plugin.data.latencies;
 		const samples = all.filter((s) => !s.cause);
