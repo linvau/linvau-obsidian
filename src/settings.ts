@@ -1,6 +1,7 @@
 import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type LinvauPlugin from "./main";
 import { errMsg } from "./util";
+import { DEFAULT_API_BASE } from "./types";
 
 export class LinvauSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: LinvauPlugin) {
@@ -15,19 +16,6 @@ export class LinvauSettingTab extends PluginSettingTab {
 			cls: "setting-item-description",
 			text: "Pilot build. Notes are only published when you run “Publish current note”. Nothing else in your vault is read or sent.",
 		});
-
-		new Setting(containerEl).setName("Connection").setHeading();
-
-		new Setting(containerEl)
-			.setName("API URL")
-			.setDesc("Pilot server address, e.g. https://linvau-api-mock.<your-subdomain>.workers.dev")
-			.addText((t) =>
-				t.setPlaceholder("https://…workers.dev")
-					.setValue(this.plugin.data.settings.apiBase)
-					.onChange(async (v) => {
-						this.plugin.data.settings.apiBase = v.trim().replace(/\/+$/, "");
-						await this.plugin.saveState();
-					}));
 
 		new Setting(containerEl).setName("Account").setHeading();
 		const session = this.plugin.session;
@@ -125,6 +113,39 @@ export class LinvauSettingTab extends PluginSettingTab {
 					this.plugin.logger.verbose = v;
 					await this.plugin.saveState();
 				}));
+
+		// ── Advanced: folded. The server address is built in (D-54); this is only for pointing at a test server.
+		const adv = containerEl.createEl("details", { cls: "linvau-advanced" });
+		adv.createEl("summary", { text: "Advanced" });
+		const custom = this.plugin.data.settings.apiBase;
+		if (custom) adv.open = true;
+		new Setting(adv)
+			.setName("Server address")
+			.setDesc(`Development only. Leave it empty to use the Linvau server (${DEFAULT_API_BASE}). `
+				+ "Changing it disconnects this device: sessions belong to one server.")
+			.addText((t) => {
+				t.setPlaceholder(DEFAULT_API_BASE).setValue(custom);
+				t.inputEl.addEventListener("change", () => void this.setApiBase(t.getValue()));
+			})
+			.addExtraButton((b) => b.setIcon("rotate-ccw").setTooltip("Use the Linvau server").setDisabled(!custom)
+				.onClick(() => void this.setApiBase("")));
+		if (custom) adv.createDiv({ cls: "setting-item-description mod-warning", text: `This device is using a development server: ${custom}` });
+	}
+
+	private async setApiBase(raw: string) {
+		const v = raw.trim().replace(/\/+$/, "");
+		const next = v === DEFAULT_API_BASE ? "" : v;
+		if (next && !/^https?:\/\/[^\s/]+/.test(next)) { new Notice("Linvau: enter a full address, like https://example.workers.dev"); return; }
+		if (next === this.plugin.data.settings.apiBase) return;
+		this.plugin.data.settings.apiBase = next;
+		await this.plugin.saveState();
+		this.plugin.logger.info(`server address set to ${next || "the Linvau server"}`);
+		if (this.plugin.session.connected) {
+			this.plugin.session.clear("server address changed");
+			this.plugin.accountNotes = null;
+			new Notice("Linvau: server changed. Connect this device again to publish.");
+		}
+		this.display();
 	}
 }
 

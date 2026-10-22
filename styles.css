@@ -56,3 +56,14 @@
 }
 .linvau-log .linvau-account.is-ok { background: rgba(var(--color-green-rgb), 0.12); }
 .linvau-log .linvau-account.is-bad { background: rgba(var(--color-red-rgb), 0.12); font-weight: 600; }
+
+/* 0.1.8: notes of the account that are not in this vault */
+.linvau-section-head { display: flex; align-items: center; justify-content: space-between; gap: var(--size-4-2); }
+.linvau-section-head h4 { margin-bottom: var(--size-4-1); }
+.linvau-remote-path { color: var(--text-normal); word-break: break-word; }
+.linvau-row-actions { display: flex; flex-wrap: wrap; gap: var(--size-4-1); margin-top: var(--size-4-1); }
+.linvau-row-actions button { font-size: var(--font-ui-smaller); padding: var(--size-2-1) var(--size-4-2); height: auto; }
+.linvau-row-actions .linvau-btn-icon { display: inline-flex; margin-right: var(--size-2-2); }
+.linvau-row-actions .linvau-btn-icon svg { width: 14px; height: 14px; }
+.linvau-advanced { margin-top: var(--size-4-4); border-top: 1px solid var(--background-modifier-border); padding-top: var(--size-4-2); }
+.linvau-advanced > summary { cursor: pointer; font-weight: var(--font-semibold); padding: var(--size-4-1) 0; }

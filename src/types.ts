@@ -29,6 +29,7 @@ export interface NoteRecord {
 }
 
 export interface LinvauSettings {
+	/** Empty = the Linvau server (DEFAULT_API_BASE). Only set for development (Settings → Advanced). */
 	apiBase: string;
 	debounceSeconds: number;
 	maxWaitSeconds: number;
@@ -58,6 +59,9 @@ export interface PluginData {
 	/** Last log lines, kept across restarts so diagnostics survive closing the app. Stays on the device. */
 	log?: { ts: number; level: "debug" | "info" | "warn" | "error"; msg: string }[];
 }
+
+/** The Linvau server. Built in: users never type it (D-54). */
+export const DEFAULT_API_BASE = "https://linvau-api-mock.linvau.workers.dev";
 
 export const DEFAULT_SETTINGS: LinvauSettings = {
 	apiBase: "",

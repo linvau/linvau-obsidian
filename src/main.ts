@@ -6,7 +6,7 @@ import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
 import { ConfirmModal, LinvauSettingTab } from "./settings";
 import { SyncEngine } from "./sync";
 import {
-	DEFAULT_SETTINGS, LatencySample, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
+	DEFAULT_API_BASE, DEFAULT_SETTINGS, LatencySample, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
 } from "./types";
 import { ago, errMsg, fmtMs, percentile } from "./util";
 import { ContentBuilder, type BuildOptions, type Payload } from "./content";
@@ -32,6 +32,10 @@ export default class LinvauPlugin extends Plugin {
 	/** Files that disappeared: the link is paused only if they do not come back within the grace period. */
 	private pendingDeletes = new Map<string, number>();
 	private registryRun: Promise<void> | null = null;
+	/** Last answer of the account's note list (all devices and vaults). Null until the first successful read. */
+	accountNotes: RemoteNote[] | null = null;
+	accountCheckedAt: number | null = null;
+	private lastRegistrySummary = "";
 	private lastConflictNotice = new Map<string, number>();
 	sync!: SyncEngine;
 	builder!: ContentBuilder;
@@ -45,7 +49,7 @@ export default class LinvauPlugin extends Plugin {
 		await this.loadState();
 		this.logger.entries = [...(this.data.log ?? [])];
 		this.logger.verbose = this.data.settings.verbose;
-		this.api = new LinvauApi(() => this.data.settings.apiBase);
+		this.api = new LinvauApi(() => this.apiBase());
 		this.session = new Session(this.app, this.api, (level, msg) => this.logger[level](msg));
 		this.api.tokens = this.session;
 		this.register(this.session.onChange(() => this.refreshUi()));
@@ -131,6 +135,14 @@ export default class LinvauPlugin extends Plugin {
 				.map((l) => (!l.cause && raw?.log === undefined && l.sinceLastSave > 60_000 ? { ...l, cause: "legacy-outlier" as const } : l)),
 			log: raw?.log ?? [],
 		};
+		// 0.1.8: the server address is built in. A stored copy of it is dropped so future defaults apply.
+		const stored = this.data.settings.apiBase.trim().replace(/\/+$/, "");
+		this.data.settings.apiBase = stored === DEFAULT_API_BASE ? "" : stored;
+	}
+
+	/** The server this device talks to: the built-in one unless a development URL is set. */
+	apiBase(): string {
+		return this.data.settings.apiBase || DEFAULT_API_BASE;
 	}
 
 	async saveState() {
@@ -143,10 +155,6 @@ export default class LinvauPlugin extends Plugin {
 	/** Resolves true when this device has a session, asking the author to connect if needed. */
 	ensureConnected(reason: string | null = null): Promise<boolean> {
 		if (this.session.connected) return Promise.resolve(true);
-		if (!this.data.settings.apiBase) {
-			new Notice("Linvau: set the API URL first (Settings → Linvau).");
-			return Promise.resolve(false);
-		}
 		if (this.connecting) return this.connecting;
 		this.connecting = new Promise<boolean>((resolve) => {
 			new ConnectModal(this.app, this.api, this.deviceInfo(), reason, (r) => {
@@ -174,6 +182,7 @@ export default class LinvauPlugin extends Plugin {
 	async disconnect() {
 		try { await this.api.logout(); } catch (e) { this.logger.warn(`logout request failed (${errMsg(e)}); the session is removed from this device anyway`); }
 		this.session.clear("disconnected by the author");
+		this.accountNotes = null;
 		new Notice("Linvau: this device is disconnected.");
 	}
 
@@ -245,8 +254,20 @@ export default class LinvauPlugin extends Plugin {
 					if (rec.state === "ORPHAN" && rec.autoPaused) void this.autoResume(f);
 				}
 			}
-			if (rec.state === "SUSPENDED" && r.state === "ACTIVE") rec.state = "ACTIVE";
-			else if (rec.state === "ACTIVE" && r.state === "SUSPENDED") { rec.state = "SUSPENDED"; this.sync.cancel(rec.path); }
+			if (rec.state === "SUSPENDED" && r.state === "ACTIVE") {
+				// Resumed from another device: publish what was edited here while it was paused.
+				rec.state = "ACTIVE";
+				this.logger.info(`link resumed from another device: ${rec.path}`);
+				if (this.app.vault.getAbstractFileByPath(rec.path) instanceof TFile) {
+					this.sync.markDirty(rec.path, "resumed elsewhere");
+					this.sync.schedule(rec.path, 0);
+				}
+			}
+			else if (rec.state === "ACTIVE" && r.state === "SUSPENDED") {
+				rec.state = "SUSPENDED";
+				this.sync.cancel(rec.path);
+				this.logger.info(`link paused from another device: ${rec.path}`);
+			}
 		}
 
 		const known = new Set(Object.values(this.data.notes).map((n) => n.noteId));
@@ -261,9 +282,89 @@ export default class LinvauPlugin extends Plugin {
 
 		if (adopted || removed || moved) {
 			await this.saveState();
-			this.refreshUi();
 			this.logger.info(`registry (${reason}): ${adopted} linked, ${moved} renamed, ${removed} removed`);
 			if (adopted) new Notice(`Linvau: ${adopted} note(s) published from your other devices are now linked here.`);
+		}
+
+		this.accountNotes = remote;
+		this.accountCheckedAt = Date.now();
+		const here = new Set(Object.values(this.data.notes).map((n) => n.noteId));
+		const inVault = remote.filter((r) => here.has(r.noteId)).length;
+		const summary = `${remote.length} in the account, ${inVault} in this vault, ${remote.length - inVault} elsewhere`;
+		// Every read is logged, except periodic ones that found nothing new (they run every 5 min).
+		if (reason !== "periodic" || summary !== this.lastRegistrySummary) this.logger.info(`registry (${reason}): ${summary}`);
+		this.lastRegistrySummary = summary;
+		this.refreshUi();
+	}
+
+	/** Notes of the account that are not in this vault: published from other devices or vaults. */
+	otherNotes(): RemoteNote[] {
+		if (!this.accountNotes) return [];
+		const here = new Set(Object.values(this.data.notes).map((n) => n.noteId));
+		return this.accountNotes.filter((r) => !here.has(r.noteId));
+	}
+
+	// ── Control of links whose file is not on this device (D-54: pause or unpublish any link from any device)
+
+	private setRemoteState(noteId: string, state: string | null) {
+		if (!this.accountNotes) return;
+		this.accountNotes = state === null
+			? this.accountNotes.filter((r) => r.noteId !== noteId)
+			: this.accountNotes.map((r) => (r.noteId === noteId ? { ...r, state, updatedAt: new Date().toISOString() } : r));
+		this.refreshUi();
+	}
+
+	async remoteSuspend(r: RemoteNote) {
+		try {
+			await this.api.suspend(r.noteId);
+			this.setRemoteState(r.noteId, "SUSPENDED");
+			this.logger.info(`link paused from this device (file on another device): ${r.path}`);
+			new Notice("Linvau: link paused. Readers now see “paused by the author”.");
+		} catch (e) { this.remoteFailed(r, e); }
+	}
+
+	async remoteResume(r: RemoteNote) {
+		try {
+			const res = await this.api.resume(r.noteId);
+			this.setRemoteState(r.noteId, res.state);
+			this.logger.info(`link resumed from this device (file on another device): ${r.path}`);
+			new Notice("Linvau: link active again. It shows the last published version; new edits come from the device that has the file.");
+		} catch (e) { this.remoteFailed(r, e); }
+	}
+
+	confirmRemoteUnpublish(r: RemoteNote) {
+		this.confirm("Unpublish this note?",
+			`“${r.path}” is published from another device. The link stops working for everyone and its files are deleted from Linvau. The note itself stays on that device. If that device edits it again, it will not be republished unless someone publishes it again.`,
+			"Unpublish", () => void this.remoteUnpublish(r));
+	}
+
+	async remoteUnpublish(r: RemoteNote) {
+		try {
+			await this.api.remove(r.noteId);
+		} catch (e) {
+			if (!(e instanceof ApiError && e.status === 404)) { this.remoteFailed(r, e); return; }
+		}
+		this.setRemoteState(r.noteId, null);
+		this.logger.info(`unpublished from this device (file on another device): ${r.path}`);
+		new Notice("Linvau: note unpublished.");
+	}
+
+	private remoteFailed(r: RemoteNote, e: unknown) {
+		if (e instanceof ApiError && e.status === 404) {
+			this.setRemoteState(r.noteId, null);
+			new Notice("Linvau: this note was already unpublished.");
+			return;
+		}
+		if (isAuthLost(e)) this.onAuthLost((e as ApiError).code);
+		new Notice(`Linvau: ${errMsg(e)}`);
+	}
+
+	async copyRemoteLink(r: RemoteNote) {
+		try {
+			await navigator.clipboard.writeText(r.url);
+			new Notice(`Linvau: link copied — v${r.version}, ${r.state.toLowerCase()}`);
+		} catch {
+			new Notice(`Linvau link: ${r.url}`, 10_000);
 		}
 	}
 
@@ -869,7 +970,7 @@ export default class LinvauPlugin extends Plugin {
 			platform: this.platformName(),
 			online: navigator.onLine,
 			settings: {
-				apiBase: this.data.settings.apiBase, debounceSeconds: this.data.settings.debounceSeconds,
+				apiBase: this.apiBase(), customApi: !!this.data.settings.apiBase, debounceSeconds: this.data.settings.debounceSeconds,
 				maxWaitSeconds: this.data.settings.maxWaitSeconds, connected: this.session.connected,
 			},
 			latency: {

@@ -38,6 +38,57 @@ export class LinvauLogView extends ItemView {
 		}, 200);
 	}
 
+	/** Read-only view with link controls: the file is on another device, so content cannot change from here. */
+	private renderOtherNotes() {
+		const { contentEl, plugin } = this;
+		const others = plugin.otherNotes();
+		const head = contentEl.createDiv({ cls: "linvau-section-head" });
+		head.createEl("h4", { text: plugin.accountNotes ? `On other devices or vaults (${others.length})` : "On other devices or vaults" });
+		const refresh = head.createEl("button", { cls: "clickable-icon", attr: { "aria-label": "Refresh from the account" } });
+		setIcon(refresh, "refresh-cw");
+		refresh.addEventListener("click", () => {
+			refresh.disabled = true;
+			void plugin.syncRegistry("manual").finally(() => { refresh.disabled = false; });
+		});
+
+		if (!plugin.accountNotes) {
+			contentEl.createDiv({ cls: "linvau-muted", text: "Not read from the account yet. Use ↻ to check now." });
+			return;
+		}
+		contentEl.createDiv({
+			cls: "linvau-muted",
+			text: `Their files are not on this device: you can open, pause or unpublish the link, but edits only come from the device that has the file. Checked ${ago(plugin.accountCheckedAt)}.`,
+		});
+		if (!others.length) {
+			contentEl.createDiv({ cls: "linvau-muted", text: "Every published note of your account is in this vault." });
+			return;
+		}
+		const list = contentEl.createDiv({ cls: "linvau-notes linvau-others" });
+		for (const r of [...others].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt))) {
+			const row = list.createDiv({ cls: "linvau-note-row" });
+			row.createSpan({ cls: `linvau-badge state-${r.state.toLowerCase()}`, text: r.state });
+			row.createSpan({ cls: "linvau-remote-path", text: r.path });
+			row.createSpan({ cls: "linvau-muted", text: ` v${r.version} · ${ago(Date.parse(r.updatedAt) || null)}` });
+			const actions = row.createDiv({ cls: "linvau-row-actions" });
+			const act = (label: string, icon: string, run: () => void | Promise<void>, warning = false) => {
+				const b = actions.createEl("button", { attr: { "aria-label": label } });
+				const i = b.createSpan({ cls: "linvau-btn-icon" });
+				setIcon(i, icon);
+				b.createSpan({ text: label });
+				if (warning) b.addClass("mod-warning");
+				b.addEventListener("click", async () => {
+					actions.querySelectorAll("button").forEach((x) => (x.disabled = true));
+					try { await run(); } finally { actions.querySelectorAll("button").forEach((x) => (x.disabled = false)); }
+				});
+			};
+			if (r.state === "ACTIVE") act("Open", "external-link", () => { window.open(r.url, "_blank"); });
+			act("Copy link", "link", () => plugin.copyRemoteLink(r));
+			if (r.state === "SUSPENDED") act("Resume", "play", () => plugin.remoteResume(r));
+			else act("Pause", "pause", () => plugin.remoteSuspend(r));
+			act("Unpublish", "trash-2", () => plugin.confirmRemoteUnpublish(r), true);
+		}
+	}
+
 	private render() {
 		const { contentEl } = this;
 		const { plugin } = this;
@@ -113,7 +164,7 @@ export class LinvauLogView extends ItemView {
 
 		// ── Notes
 		const notes = Object.values(plugin.data.notes);
-		contentEl.createEl("h4", { text: `Published notes (${notes.length})` });
+		contentEl.createEl("h4", { text: `Published notes in this vault (${notes.length})` });
 		if (!notes.length) {
 			contentEl.createDiv({ cls: "linvau-muted", text: "None yet. Open a note and run “Linvau: Publish current note”." });
 		} else {
@@ -138,6 +189,9 @@ export class LinvauLogView extends ItemView {
 				}
 			}
 		}
+
+		// ── Notes of the account that are not in this vault (published from other devices or vaults)
+		if (plugin.session.connected) this.renderOtherNotes();
 
 		// ── Log
 		contentEl.createEl("h4", { text: "Event log" });
