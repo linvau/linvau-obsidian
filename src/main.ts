@@ -1,5 +1,6 @@
 import { Menu, Notice, Platform, Plugin, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
-import { ApiError, LinvauApi, isAuthLost } from "./api";
+import { ApiError, LinvauApi, isAuthLost, type RemoteNote } from "./api";
+import { ChoiceModal } from "./choiceModal";
 import { Logger } from "./logger";
 import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
 import { ConfirmModal, LinvauSettingTab } from "./settings";
@@ -13,6 +14,13 @@ import { EmbedsModal } from "./embedsModal";
 import { LEGACY_TOKEN_KEY, Session } from "./session";
 import { ConnectModal, connectedNotice } from "./connectModal";
 
+/** How long a removed file may stay away before its link is paused (sync tools replace files as delete + create). */
+const DELETE_GRACE_MS = 5 * 60_000;
+/** How long to wait for the vault sync to bring a newer version from another device before asking the author. */
+const CONFLICT_WAIT_MS = 10 * 60_000;
+const CONFLICT_RECHECK_MS = 60_000;
+const REGISTRY_INTERVAL_MS = 5 * 60_000;
+
 export default class LinvauPlugin extends Plugin {
 	data!: PluginData;
 	logger = new Logger();
@@ -21,6 +29,10 @@ export default class LinvauPlugin extends Plugin {
 	private connecting: Promise<boolean> | null = null;
 	private authLostNotified = false;
 	private lastNotConnectedHint = 0;
+	/** Files that disappeared: the link is paused only if they do not come back within the grace period. */
+	private pendingDeletes = new Map<string, number>();
+	private registryRun: Promise<void> | null = null;
+	private lastConflictNotice = new Map<string, number>();
 	sync!: SyncEngine;
 	builder!: ContentBuilder;
 	/** note path → files its published content depends on (attachments, approved embedded notes). */
@@ -89,8 +101,10 @@ export default class LinvauPlugin extends Plugin {
 		// indexing (which fires "create" for every file) is not mistaken for user edits.
 		this.app.workspace.onLayoutReady(() => {
 			this.registerVaultEvents();
-			void this.reconcile();
+			void this.syncRegistry("startup").then(() => this.reconcile());
 			void this.ensureLogView();
+			// Other devices may publish, rename or unpublish notes: refresh the shared registry regularly.
+			this.registerInterval(window.setInterval(() => void this.syncRegistry("periodic"), REGISTRY_INTERVAL_MS));
 		});
 
 		this.logger.info(`Linvau pilot ${this.manifest.version} loaded (${this.platformName()})`);
@@ -142,8 +156,8 @@ export default class LinvauPlugin extends Plugin {
 				this.authLostNotified = false;
 				this.logger.info(`connected this device (${r.device.name})${r.claimedNotes ? `; ${r.claimedNotes} pilot note(s) moved to the account` : ""}`);
 				connectedNotice(r);
-				// Notes that could not sync while disconnected go out now.
-				this.syncAll();
+				// Link notes published from other devices, then send what could not sync while disconnected.
+				void this.syncRegistry("connected").then(() => this.syncAll());
 				resolve(true);
 			}).open();
 		});
@@ -185,6 +199,222 @@ export default class LinvauPlugin extends Plugin {
 		new Notice("Linvau: this device is not connected, so edits to this note are not published. Run “Linvau: Connect this device”.", 8000);
 	}
 
+	// ─────────────────────────────── Shared registry (T-1 / D-59): the server knows every published note
+
+	/** Notes published from other devices become known here; renames and unpublishes are mirrored. */
+	syncRegistry(reason: string): Promise<void> {
+		if (!this.session.connected) return Promise.resolve();
+		if (this.registryRun) return this.registryRun;
+		this.registryRun = this.doSyncRegistry(reason).finally(() => { this.registryRun = null; });
+		return this.registryRun;
+	}
+
+	private async doSyncRegistry(reason: string) {
+		let remote: RemoteNote[];
+		try {
+			remote = (await this.api.listNotes()).notes;
+		} catch (e) {
+			this.logger.warn(`could not read the account's notes (${reason}): ${errMsg(e)}`);
+			return;
+		}
+		const byId = new Map(remote.map((n) => [n.noteId, n]));
+		let adopted = 0, removed = 0, moved = 0;
+
+		for (const rec of Object.values(this.data.notes)) {
+			const r = byId.get(rec.noteId);
+			if (!r) {
+				// Unpublished from another device (or deleted on the server).
+				delete this.data.notes[rec.path];
+				this.sync.cancel(rec.path);
+				this.clearDeleteGrace(rec.path);
+				removed++;
+				this.logger.info(`no longer published (unpublished from another device): ${rec.path}`);
+				continue;
+			}
+			if (r.path !== rec.path && !this.data.notes[r.path]) {
+				const f = this.app.vault.getAbstractFileByPath(r.path);
+				if (f instanceof TFile) {
+					// Renamed on another device: the sync delivered it here as delete + create.
+					delete this.data.notes[rec.path];
+					this.clearDeleteGrace(rec.path);
+					this.sync.rename(rec.path, r.path);
+					rec.path = r.path;
+					this.data.notes[r.path] = rec;
+					moved++;
+					this.logger.info(`renamed on another device, link kept: ${r.path}`);
+					if (rec.state === "ORPHAN" && rec.autoPaused) void this.autoResume(f);
+				}
+			}
+			if (rec.state === "SUSPENDED" && r.state === "ACTIVE") rec.state = "ACTIVE";
+			else if (rec.state === "ACTIVE" && r.state === "SUSPENDED") { rec.state = "SUSPENDED"; this.sync.cancel(rec.path); }
+		}
+
+		const known = new Set(Object.values(this.data.notes).map((n) => n.noteId));
+		for (const r of remote) {
+			if (known.has(r.noteId) || this.data.notes[r.path]) continue;
+			const f = this.app.vault.getAbstractFileByPath(r.path);
+			if (!(f instanceof TFile)) continue;
+			this.data.notes[r.path] = this.recordFromRemote(r, true);
+			adopted++;
+			this.logger.info(`linked note published from another device: ${r.path} (v${r.version})`);
+		}
+
+		if (adopted || removed || moved) {
+			await this.saveState();
+			this.refreshUi();
+			this.logger.info(`registry (${reason}): ${adopted} linked, ${moved} renamed, ${removed} removed`);
+			if (adopted) new Notice(`Linvau: ${adopted} note(s) published from your other devices are now linked here.`);
+		}
+	}
+
+	private recordFromRemote(r: RemoteNote, awaitLocalEdit: boolean): NoteRecord {
+		return {
+			noteId: r.noteId, shareId: r.shareId, url: r.url, path: r.path,
+			state: r.state === "SUSPENDED" ? "SUSPENDED" : "ACTIVE",
+			version: r.version, hash: r.hash, lastSyncAt: Date.parse(r.updatedAt) || null,
+			assetsEnabled: true, approvedEmbeds: [], pendingEmbeds: [],
+			...(awaitLocalEdit ? { awaitLocalEdit: true } : {}),
+		};
+	}
+
+	private async findRemote(path: string): Promise<RemoteNote | null> {
+		try {
+			const { notes } = await this.api.listNotes();
+			return notes.find((n) => n.path === path) ?? null;
+		} catch (e) {
+			this.logger.warn(`could not check the account's notes: ${errMsg(e)}`);
+			return null;
+		}
+	}
+
+	private async adoptAndPublish(file: TFile, remote: RemoteNote) {
+		const rec = this.recordFromRemote(remote, false);
+		rec.path = file.path;
+		this.data.notes[file.path] = rec;
+		await this.saveState();
+		this.logger.info(`using the existing link for ${file.path} (v${remote.version})`);
+		if (rec.state === "SUSPENDED") {
+			new Notice("Linvau: linked to the existing link, which is paused. Use “Resume link” to reactivate it.");
+		} else {
+			this.sync.markDirty(file.path, "publish");
+			await this.sync.flush(file.path);
+		}
+		await this.copyLink(rec);
+		this.refreshUi();
+	}
+
+	// ─────────────────────────────── Deleted files: wait before pausing (sync tools replace files)
+
+	private startDeleteGrace(path: string) {
+		this.clearDeleteGrace(path);
+		this.logger.warn(`file removed locally; the link is paused in ${DELETE_GRACE_MS / 60000} min unless it comes back: ${path}`);
+		const t = window.setTimeout(() => void this.finishDelete(path), DELETE_GRACE_MS);
+		this.pendingDeletes.set(path, t);
+		this.refreshUi();
+	}
+
+	private clearDeleteGrace(path: string) {
+		const t = this.pendingDeletes.get(path);
+		if (t !== undefined) window.clearTimeout(t);
+		this.pendingDeletes.delete(path);
+	}
+
+	private async finishDelete(path: string) {
+		this.pendingDeletes.delete(path);
+		const before = this.data.notes[path];
+		if (!before) return;
+		const noteId = before.noteId;
+		// A rename on another device arrives as delete + create: the registry knows the new path.
+		await this.syncRegistry("file removed");
+		const rec = Object.values(this.data.notes).find((n) => n.noteId === noteId);
+		if (!rec || rec.state === "ORPHAN") return;
+		if (this.app.vault.getAbstractFileByPath(rec.path) instanceof TFile) return;
+		rec.state = "ORPHAN";
+		rec.autoPaused = true;
+		await this.saveState();
+		try {
+			await this.api.suspend(rec.noteId);
+			this.logger.warn(`file still missing after ${DELETE_GRACE_MS / 60000} min → link paused: ${rec.path}`);
+		} catch (e) {
+			this.logger.error(`could not pause link on server: ${errMsg(e)}`);
+		}
+		this.notify(`Linvau: “${rec.path.split("/").pop()}” was deleted, so its link was paused. It reactivates by itself if the file comes back.`);
+		this.refreshUi();
+	}
+
+	private async autoResume(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		try {
+			await this.api.resume(rec.noteId);
+			rec.state = "ACTIVE";
+			delete rec.autoPaused;
+			await this.saveState();
+			this.logger.info(`file is back → link reactivated: ${file.path}`);
+			new Notice(`Linvau: “${file.basename}” is back, so its link is active again.`);
+			this.sync.markDirty(file.path, "restored");
+			await this.sync.flush(file.path);
+		} catch (e) {
+			this.logger.error(`could not reactivate link: ${errMsg(e)}`);
+		}
+		this.refreshUi();
+	}
+
+	// ─────────────────────────────── Newer version from another device (D-60)
+
+	onNewerVersion(rec: NoteRecord, e: ApiError) {
+		const now = Date.now();
+		rec.serverVersion = Number(e.body.serverVersion) || rec.serverVersion;
+		rec.serverHash = (e.body.serverHash as string | null | undefined) ?? rec.serverHash ?? null;
+		rec.conflictSince ??= now;
+		if (now - rec.conflictSince < CONFLICT_WAIT_MS) {
+			if (rec.state !== "CONFLICT") rec.state = "ACTIVE";
+			this.logger.warn(`v${rec.serverVersion} was published from another device; waiting for the vault sync before publishing this copy: ${rec.path}`);
+			this.sync.schedule(rec.path, CONFLICT_RECHECK_MS);
+		} else {
+			rec.state = "CONFLICT";
+			this.logger.error(`conflict: this device's copy still differs from v${rec.serverVersion} published from another device: ${rec.path}`);
+			const last = this.lastConflictNotice.get(rec.path) ?? 0;
+			if (now - last > 30 * 60_000) {
+				this.lastConflictNotice.set(rec.path, now);
+				this.notify(`Linvau: “${rec.path.split("/").pop()}” was changed on another device and differs from this copy. Run “Linvau: Resolve conflict” to choose which version stays published.`);
+			}
+		}
+		this.refreshUi();
+	}
+
+	resolveConflict(rec: NoteRecord, how: "synced" | "keep-published" | "publish-local") {
+		if (how === "publish-local") {
+			rec.forcePublish = true;
+			rec.state = "ACTIVE";
+			this.logger.info(`conflict: the author chose this device's version: ${rec.path}`);
+			this.sync.markDirty(rec.path, "conflict");
+			void this.sync.flush(rec.path);
+		} else {
+			rec.version = rec.serverVersion ?? rec.version;
+			rec.hash = rec.serverHash ?? rec.hash;
+			rec.state = "ACTIVE";
+			delete rec.conflictSince; delete rec.serverVersion; delete rec.serverHash; delete rec.forcePublish;
+			this.logger.info(how === "synced"
+				? `in sync with v${rec.version} from another device: ${rec.path}`
+				: `conflict: the author kept the published v${rec.version}: ${rec.path}`);
+		}
+		void this.saveState();
+		this.refreshUi();
+	}
+
+	openConflict(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec || rec.state !== "CONFLICT") return;
+		new ChoiceModal(this.app, "Which version stays published?", [
+			`Another device published version ${rec.serverVersion ?? "?"} of “${file.basename}”, and this device's copy is different.`,
+			"Usually the vault sync settles it on its own. If it did not, choose: keeping the published version leaves the link as readers see it now; publishing this copy replaces it.",
+		], [
+			{ label: "Keep the published version", run: () => this.resolveConflict(rec, "keep-published") },
+			{ label: "Publish this device's copy", cta: true, run: () => this.resolveConflict(rec, "publish-local") },
+		]).open();
+	}
+
 	deviceInfo(): { name: string; platform: string; lang: string } {
 		const platform = Platform.isIosApp ? "ios" : Platform.isAndroidApp ? "android" : Platform.isMacOS ? "macos" : Platform.isWin ? "windows" : Platform.isLinux ? "linux" : "unknown";
 		const lang = (window.localStorage.getItem("language") || navigator.language || "en").slice(0, 2);
@@ -209,6 +439,11 @@ export default class LinvauPlugin extends Plugin {
 
 		this.registerEvent(vault.on("modify", (f) => {
 			if (!(f instanceof TFile)) return;
+			const rec = this.data.notes[f.path];
+			if (rec?.awaitLocalEdit) {
+				delete rec.awaitLocalEdit;
+				this.logger.info(`first edit on this device of a note linked from another device: ${f.path}`);
+			}
 			this.sync.markDirty(f.path, "modify");
 			this.markDependents(f.path);
 		}));
@@ -241,23 +476,29 @@ export default class LinvauPlugin extends Plugin {
 		this.registerEvent(vault.on("delete", (f) => {
 			this.markDependents(f.path);
 			const rec = this.data.notes[f.path];
-			if (!rec) return;
+			if (!rec || rec.state === "ORPHAN") return;
 			this.sync.cancel(f.path);
-			rec.state = "ORPHAN";
-			void this.saveState();
-			this.logger.warn(`local file deleted → pausing link: ${f.path}`);
-			this.api.suspend(rec.noteId)
-				.then(() => this.logger.info(`link paused on server: ${f.path}`))
-				.catch((e) => this.logger.error(`could not pause link on server: ${errMsg(e)}`));
-			this.notify(`Linvau: “${f.name}” was deleted, so its link was paused. Restore the file and run “Resume” to reactivate it.`);
-			this.refreshUi();
+			this.startDeleteGrace(f.path);
 		}));
 
 		this.registerEvent(vault.on("create", (f) => {
+			if (!(f instanceof TFile)) return;
+			const pending = this.pendingDeletes.get(f.path);
+			if (pending !== undefined) {
+				window.clearTimeout(pending);
+				this.pendingDeletes.delete(f.path);
+				this.logger.info(`file is back within the grace period, link untouched: ${f.path}`);
+				this.sync.markDirty(f.path, "restored");
+				this.refreshUi();
+				return;
+			}
 			const rec = this.data.notes[f.path];
 			if (rec?.state === "ORPHAN") {
-				this.logger.info(`file restored: ${f.path} — run “Resume link” to reactivate`);
-				this.refreshUi();
+				if (rec.autoPaused) void this.autoResume(f);
+				else {
+					this.logger.info(`file restored: ${f.path} — run “Resume link” to reactivate`);
+					this.refreshUi();
+				}
 			}
 		}));
 	}
@@ -313,13 +554,14 @@ export default class LinvauPlugin extends Plugin {
 		for (const [i, rec] of recs.entries()) {
 			const file = this.app.vault.getAbstractFileByPath(rec.path);
 			if (!(file instanceof TFile)) {
-				if (rec.state !== "ORPHAN") {
+				if (rec.state !== "ORPHAN" && !this.pendingDeletes.has(rec.path)) {
 					missing++;
 					this.logger.warn(`reconcile: file missing locally: ${rec.path}`);
+					this.startDeleteGrace(rec.path);
 				}
 				continue;
 			}
-			if (rec.state === "SUSPENDED" || rec.state === "ORPHAN") continue;
+			if (rec.state === "SUSPENDED" || rec.state === "ORPHAN" || rec.awaitLocalEdit) continue;
 			try {
 				const payload = await this.buildFor(file, rec);
 				if (payload.hash !== rec.hash || rec.state !== "ACTIVE") {
@@ -367,6 +609,13 @@ export default class LinvauPlugin extends Plugin {
 			checkCallback: withActive((f) => void this.openEmbeds(f), true) });
 		this.addCommand({ id: "open-panel", name: "Open pilot panel", icon: "radio", callback: () => void this.openLogView() });
 		this.addCommand({ id: "sync-all", name: "Sync all published notes", icon: "refresh-cw", callback: () => this.syncAll() });
+		this.addCommand({ id: "resolve-conflict", name: "Resolve conflict of current note", icon: "git-compare",
+			checkCallback: (checking: boolean) => {
+				const f = this.app.workspace.getActiveFile();
+				if (!f || this.data.notes[f.path]?.state !== "CONFLICT") return false;
+				if (!checking) this.openConflict(f);
+				return true;
+			} });
 		this.addCommand({ id: "connect", name: "Connect this device", icon: "log-in",
 			callback: () => void this.ensureConnected() });
 		this.addCommand({ id: "disconnect", name: "Disconnect this device", icon: "log-out",
@@ -409,7 +658,10 @@ export default class LinvauPlugin extends Plugin {
 		menu.addItem((i) => i.setSection("linvau").setTitle(`Linvau · v${rec.version} · ${rec.state.toLowerCase()} · ${ago(rec.lastSyncAt)}`)
 			.setIcon("info").setDisabled(true));
 
-		if (rec.state === "ORPHAN") {
+		if (rec.state === "CONFLICT") {
+			add("Linvau: resolve conflict…", "git-compare", () => this.openConflict(file));
+			add("Linvau: copy link", "link", () => void this.copyLink(rec));
+		} else if (rec.state === "ORPHAN") {
 			add("Linvau: resume link", "play", () => void this.resume(file));
 		} else if (rec.state === "SUSPENDED") {
 			add("Linvau: copy link", "link", () => void this.copyLink(rec));
@@ -439,6 +691,22 @@ export default class LinvauPlugin extends Plugin {
 			await this.copyLink(existing);
 			return;
 		}
+		// The note may already be published from another device: offer its link instead of a second one.
+		const remote = await this.findRemote(file.path);
+		if (remote) {
+			new ChoiceModal(this.app, "This note already has a link", [
+				`It was published from another device of your account (version ${remote.version}${remote.state === "SUSPENDED" ? ", paused" : ""}).`,
+				"Use the same link so readers keep a single address and this device updates it too.",
+			], [
+				{ label: "Create a new link", run: () => void this.publishNew(file) },
+				{ label: "Use the existing link", cta: true, run: () => void this.adoptAndPublish(file, remote) },
+			]).open();
+			return;
+		}
+		await this.publishNew(file);
+	}
+
+	private async publishNew(file: TFile) {
 		try {
 			// Look at what the note contains before anything leaves the device.
 			const scan = await this.builder.build(file, this.buildOptions({}));
@@ -525,6 +793,7 @@ export default class LinvauPlugin extends Plugin {
 		try {
 			await this.api.resume(rec.noteId);
 			rec.state = "ACTIVE";
+			delete rec.autoPaused;
 			await this.saveState();
 			this.logger.info(`link resumed: ${file.path}`);
 			this.sync.markDirty(file.path, "resume");
@@ -695,7 +964,10 @@ export default class LinvauPlugin extends Plugin {
 		if (!this.session.connected) text = `Linvau · not connected · v${rec.version} live`;
 		else if (this.sync.isInFlight(f.path)) text = "Linvau · publishing…";
 		else if (rec.state === "SUSPENDED") text = `Linvau · paused · v${rec.version}`;
+		else if (this.pendingDeletes.has(f.path)) text = "Linvau · file removed · waiting before pausing";
 		else if (rec.state === "ORPHAN") text = "Linvau · file was deleted · link paused";
+		else if (rec.state === "CONFLICT") text = "Linvau · conflict · choose which version stays";
+		else if (rec.conflictSince) text = `Linvau · waiting for the vault sync (v${rec.serverVersion} from another device)`;
 		else if (rec.state === "ERROR") text = `Linvau · error · v${rec.version} live`;
 		else if (this.sync.isDirty(f.path)) text = `Linvau · v${rec.version} live · changes pending`;
 		else text = `Linvau · v${rec.version} · ${ago(rec.lastSyncAt)}`;

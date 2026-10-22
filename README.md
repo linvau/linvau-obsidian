@@ -24,6 +24,7 @@ Linvau publishes individual notes as live links: you choose a note, get a link, 
 | Unpublish current note | Removes the link and all versions from the server |
 | Connect this device | Asks for your email and the 6-digit code we send you. Also opens by itself on your first publish |
 | Disconnect this device | Ends this device's session. Your links stay online |
+| Resolve conflict of current note | Appears only when another device published a different version and the vault sync did not settle it in 10 minutes |
 | Open pilot panel | Sync latency P50/P95, published notes, event log |
 | Copy diagnostics | Copies a JSON report (no note content) |
 

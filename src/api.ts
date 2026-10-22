@@ -1,6 +1,7 @@
 import { requestUrl } from "obsidian";
 
 export class ApiError extends Error {
+	body: Record<string, unknown> = {};
 	constructor(public status: number, message: string, public code?: string, public retryAfter?: number, public attemptsLeft?: number) {
 		super(message);
 	}
@@ -64,7 +65,9 @@ export class LinvauApi {
 
 	private fail(r: Raw): never {
 		const j = (r.json ?? {}) as { error?: string; code?: string; retryAfter?: number; attemptsLeft?: number };
-		throw new ApiError(r.status, j.error ?? `HTTP ${r.status}`, j.code, j.retryAfter, j.attemptsLeft);
+		const err = new ApiError(r.status, j.error ?? `HTTP ${r.status}`, j.code, j.retryAfter, j.attemptsLeft);
+		err.body = (r.json ?? {}) as Record<string, unknown>;
+		throw err;
 	}
 
 	/** Authenticated call: gets a token, and renews it once if the server says it expired. */
@@ -101,8 +104,10 @@ export class LinvauApi {
 	// ── notes
 	createNote(path: string, title: string) { return this.authed<CreatedNote>("POST", "/v1/notes", { body: { path, title } }); }
 	getNote(id: string) { return this.authed<RemoteNote>("GET", `/v1/notes/${id}`); }
+	/** Every note of the account that is not deleted: the shared registry of all devices. */
+	listNotes() { return this.authed<{ notes: RemoteNote[] }>("GET", "/v1/notes"); }
 	updatePath(id: string, path: string) { return this.authed<{ ok: boolean }>("PATCH", `/v1/notes/${id}`, { body: { path } }); }
-	publishVersion(id: string, p: { title: string; markdown: string; hash: string; assets: string[]; panel: unknown[] }) {
+	publishVersion(id: string, p: { title: string; markdown: string; hash: string; assets: string[]; panel: unknown[]; baseVersion?: number; force?: boolean }) {
 		return this.authed<PublishedVersion>("POST", `/v1/notes/${id}/versions`, { body: p });
 	}
 	/** Which of these attachment hashes the server does not have yet. */

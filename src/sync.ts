@@ -136,6 +136,8 @@ export class SyncEngine {
 			this.dirtySince.delete(path);
 			return;
 		}
+		// A note linked from another device is published only after an edit on this one (avoids pushing a stale copy).
+		if (rec.awaitLocalEdit) { this.dirtySince.delete(path); return; }
 		if (this.inFlight.has(path)) {
 			this.rerun.add(path);
 			return;
@@ -156,6 +158,16 @@ export class SyncEngine {
 		plugin.refreshUi();
 		try {
 			const payload = await plugin.buildFor(file, rec);
+			// Waiting on a newer version from another device: done as soon as the vault sync brings it here.
+			if (rec.conflictSince && !rec.forcePublish && payload.hash === rec.serverHash) {
+				plugin.resolveConflict(rec, "synced");
+				this.settleDirty(path);
+				return;
+			}
+			if (rec.state === "CONFLICT" && !rec.forcePublish) {
+				this.settleDirty(path);
+				return;
+			}
 			if (payload.hash === rec.hash && rec.state === "ACTIVE") {
 				plugin.logger.debug(`no content change (hash equal), skipped: ${path}`);
 				this.settleDirty(path);
@@ -187,6 +199,7 @@ export class SyncEngine {
 			const res = await plugin.api.publishVersion(rec.noteId, {
 				title: payload.title, markdown: payload.markdown, hash: payload.hash,
 				assets: payload.assets.map((a) => a.hash), panel: payload.panel,
+				baseVersion: rec.version, ...(rec.forcePublish ? { force: true } : {}),
 			});
 			const now = Date.now();
 			const api = now - t0;
@@ -200,6 +213,7 @@ export class SyncEngine {
 			current.lastSyncAt = now;
 			current.state = "ACTIVE";
 			delete current.lastError;
+			delete current.conflictSince; delete current.serverVersion; delete current.serverHash; delete current.forcePublish;
 			this.settleDirty(path);
 			this.retries.delete(path);
 			const cause = this.delayCause.get(path);
@@ -224,6 +238,13 @@ export class SyncEngine {
 			const msg = status === 503
 				? "the server could not process this note (HTTP 503) — it may be too large or too complex"
 				: errMsg(e);
+			if (e instanceof ApiError && e.code === "newer_version") {
+				// Not an error: another device is ahead. Wait for the vault sync instead of overwriting it.
+				this.retries.delete(path);
+				plugin.onNewerVersion(rec, e);
+				await plugin.saveState();
+				return;
+			}
 			rec.state = "ERROR";
 			rec.lastError = msg;
 			if (isAuthLost(e)) {

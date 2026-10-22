@@ -1,4 +1,4 @@
-export type NoteState = "PUBLISHING" | "ACTIVE" | "SUSPENDED" | "ERROR" | "ORPHAN";
+export type NoteState = "PUBLISHING" | "ACTIVE" | "SUSPENDED" | "ERROR" | "ORPHAN" | "CONFLICT";
 
 export interface NoteRecord {
 	noteId: string;
@@ -16,6 +16,16 @@ export interface NoteRecord {
 	approvedEmbeds?: string[];
 	/** Embedded notes still waiting for approval (kept to notify only once and to show a count). */
 	pendingEmbeds?: string[];
+	/** The plugin (not the author) paused the link because the file disappeared: resume it when the file is back. */
+	autoPaused?: boolean;
+	/** Linked from the account list (published on another device): publish only after a local edit. */
+	awaitLocalEdit?: boolean;
+	/** Another device published a newer version: when this device first noticed, and what the server has. */
+	conflictSince?: number;
+	serverVersion?: number;
+	serverHash?: string | null;
+	/** The author chose "publish this device's version" for a conflict. */
+	forcePublish?: boolean;
 }
 
 export interface LinvauSettings {
