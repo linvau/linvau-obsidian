@@ -20,6 +20,11 @@ const DELETE_GRACE_MS = 5 * 60_000;
 const CONFLICT_WAIT_MS = 10 * 60_000;
 const CONFLICT_RECHECK_MS = 60_000;
 const REGISTRY_INTERVAL_MS = 5 * 60_000;
+/** After a file disappears, ask the account soon: a rename on another device is then recognised in seconds. */
+const DELETE_REGISTRY_CHECK_MS = 30_000;
+const CREATE_REGISTRY_CHECK_MS = 3_000;
+/** "Waiting for the vault sync" is logged once, then at most every 5 minutes. */
+const WAIT_LOG_EVERY_MS = 5 * 60_000;
 
 export default class LinvauPlugin extends Plugin {
 	data!: PluginData;
@@ -37,6 +42,9 @@ export default class LinvauPlugin extends Plugin {
 	accountCheckedAt: number | null = null;
 	private lastRegistrySummary = "";
 	private lastConflictNotice = new Map<string, number>();
+	private lastWaitLog = new Map<string, number>();
+	private registrySoon: number | null = null;
+	private logSaveTimer: number | null = null;
 	sync!: SyncEngine;
 	builder!: ContentBuilder;
 	/** note path → files its published content depends on (attachments, approved embedded notes). */
@@ -49,6 +57,11 @@ export default class LinvauPlugin extends Plugin {
 		await this.loadState();
 		this.logger.entries = [...(this.data.log ?? [])];
 		this.logger.verbose = this.data.settings.verbose;
+		// 0.1.9: the log is saved a few seconds after each entry, so diagnostics survive closing the app.
+		this.register(this.logger.onChange(() => {
+			if (this.logSaveTimer !== null) return;
+			this.logSaveTimer = window.setTimeout(() => { this.logSaveTimer = null; void this.saveState(); }, 3000);
+		}));
 		this.api = new LinvauApi(() => this.apiBase());
 		this.session = new Session(this.app, this.api, (level, msg) => this.logger[level](msg));
 		this.api.tokens = this.session;
@@ -250,11 +263,17 @@ export default class LinvauPlugin extends Plugin {
 					rec.path = r.path;
 					this.data.notes[r.path] = rec;
 					moved++;
-					this.logger.info(`renamed on another device, link kept: ${r.path}`);
+					this.logger.info(`renamed on another device, link kept (nothing paused): ${r.path}`);
 					if (rec.state === "ORPHAN" && rec.autoPaused) void this.autoResume(f);
 				}
 			}
-			if (rec.state === "SUSPENDED" && r.state === "ACTIVE") {
+			if (rec.state === "ORPHAN" && r.state === "ACTIVE" && this.app.vault.getAbstractFileByPath(rec.path) instanceof TFile) {
+				// Reactivated on another device and the file is here again: follow it.
+				rec.state = "ACTIVE";
+				delete rec.autoPaused;
+				this.clearDeleteGrace(rec.path);
+				this.logger.info(`link active again (file back on this device): ${rec.path}`);
+			} else if (rec.state === "SUSPENDED" && r.state === "ACTIVE") {
 				// Resumed from another device: publish what was edited here while it was paused.
 				rec.state = "ACTIVE";
 				this.logger.info(`link resumed from another device: ${rec.path}`);
@@ -283,7 +302,7 @@ export default class LinvauPlugin extends Plugin {
 		if (adopted || removed || moved) {
 			await this.saveState();
 			this.logger.info(`registry (${reason}): ${adopted} linked, ${moved} renamed, ${removed} removed`);
-			if (adopted) new Notice(`Linvau: ${adopted} note(s) published from your other devices are now linked here.`);
+			if (adopted) new Notice(`Linvau: ${adopted} note(s) published from your other devices are now linked here.`, 15_000);
 		}
 
 		this.accountNotes = remote;
@@ -408,10 +427,28 @@ export default class LinvauPlugin extends Plugin {
 
 	private startDeleteGrace(path: string) {
 		this.clearDeleteGrace(path);
-		this.logger.warn(`file removed locally; the link is paused in ${DELETE_GRACE_MS / 60000} min unless it comes back: ${path}`);
+		this.logger.info(`file gone from this device (renamed by the vault sync, or deleted): checking; the link is paused only if it is still missing in ${DELETE_GRACE_MS / 60000} min: ${path}`);
 		const t = window.setTimeout(() => void this.finishDelete(path), DELETE_GRACE_MS);
 		this.pendingDeletes.set(path, t);
+		this.checkRegistrySoon("file removed", DELETE_REGISTRY_CHECK_MS);
 		this.refreshUi();
+	}
+
+	/** One account check shortly after files disappear or appear (renames from other devices arrive as delete + create). */
+	private checkRegistrySoon(reason: string, delayMs: number) {
+		if (this.registrySoon !== null) window.clearTimeout(this.registrySoon);
+		this.registrySoon = window.setTimeout(() => {
+			this.registrySoon = null;
+			void this.syncRegistry(reason).then(() => {
+				// Grace periods of files the registry already resolved (renamed elsewhere) are no longer needed.
+				for (const p of [...this.pendingDeletes.keys()]) {
+					if (!this.data.notes[p]) {
+						this.clearDeleteGrace(p);
+					}
+				}
+				this.refreshUi();
+			});
+		}, delayMs);
 	}
 
 	private clearDeleteGrace(path: string) {
@@ -443,6 +480,26 @@ export default class LinvauPlugin extends Plugin {
 		this.refreshUi();
 	}
 
+	/**
+	 * A deleted note restored to another folder (e.g. moved back from the trash by hand): if exactly one paused
+	 * note with the same file name is missing, it is the same note — its link follows the file.
+	 */
+	private restoredElsewhere(f: TFile): NoteRecord | undefined {
+		if (f.extension !== "md") return undefined;
+		const name = f.path.split("/").pop();
+		const candidates = Object.values(this.data.notes).filter((n) =>
+			n.state === "ORPHAN" && n.path.split("/").pop() === name && !(this.app.vault.getAbstractFileByPath(n.path) instanceof TFile));
+		if (candidates.length !== 1) return undefined;
+		const rec = candidates[0];
+		const old = rec.path;
+		delete this.data.notes[old];
+		rec.path = f.path;
+		this.data.notes[f.path] = rec;
+		this.logger.info(`restored in another folder: ${old} → ${f.path} (same link)`);
+		this.api.updatePath(rec.noteId, f.path).catch((e) => this.logger.warn(`could not update path on server: ${errMsg(e)}`));
+		return rec;
+	}
+
 	private async autoResume(file: TFile) {
 		const rec = this.data.notes[file.path];
 		if (!rec) return;
@@ -470,7 +527,11 @@ export default class LinvauPlugin extends Plugin {
 		rec.conflictSince ??= now;
 		if (now - rec.conflictSince < CONFLICT_WAIT_MS) {
 			if (rec.state !== "CONFLICT") rec.state = "ACTIVE";
-			this.logger.warn(`v${rec.serverVersion} was published from another device; waiting for the vault sync before publishing this copy: ${rec.path}`);
+			const lastLog = this.lastWaitLog.get(rec.path) ?? 0;
+			if (now - lastLog >= WAIT_LOG_EVERY_MS) {
+				this.lastWaitLog.set(rec.path, now);
+				this.logger.info(`v${rec.serverVersion} was published from another device; waiting for the vault sync before publishing this copy (up to ${CONFLICT_WAIT_MS / 60000} min): ${rec.path}`);
+			}
 			this.sync.schedule(rec.path, CONFLICT_RECHECK_MS);
 		} else {
 			rec.state = "CONFLICT";
@@ -485,6 +546,7 @@ export default class LinvauPlugin extends Plugin {
 	}
 
 	resolveConflict(rec: NoteRecord, how: "synced" | "keep-published" | "publish-local") {
+		this.lastWaitLog.delete(rec.path);
 		if (how === "publish-local") {
 			rec.forcePublish = true;
 			rec.state = "ACTIVE";
@@ -593,14 +655,17 @@ export default class LinvauPlugin extends Plugin {
 				this.refreshUi();
 				return;
 			}
-			const rec = this.data.notes[f.path];
+			const rec = this.data.notes[f.path] ?? this.restoredElsewhere(f);
 			if (rec?.state === "ORPHAN") {
 				if (rec.autoPaused) void this.autoResume(f);
 				else {
 					this.logger.info(`file restored: ${f.path} — run “Resume link” to reactivate`);
 					this.refreshUi();
 				}
+				return;
 			}
+			// A new file while others are missing may be a rename from another device: ask the account now.
+			if (!rec && f.extension === "md" && this.pendingDeletes.size) this.checkRegistrySoon("file appeared", CREATE_REGISTRY_CHECK_MS);
 		}));
 	}
 
@@ -660,6 +725,11 @@ export default class LinvauPlugin extends Plugin {
 					this.logger.warn(`reconcile: file missing locally: ${rec.path}`);
 					this.startDeleteGrace(rec.path);
 				}
+				continue;
+			}
+			if (rec.state === "ORPHAN" && rec.autoPaused) {
+				// The file came back while the plugin was not running (restored, or delivered by the vault sync).
+				await this.autoResume(file);
 				continue;
 			}
 			if (rec.state === "SUSPENDED" || rec.state === "ORPHAN" || rec.awaitLocalEdit) continue;
