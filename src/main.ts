@@ -44,6 +44,8 @@ export default class LinvauPlugin extends Plugin {
 	private lastConflictNotice = new Map<string, number>();
 	private lastWaitLog = new Map<string, number>();
 	private registrySoon: number | null = null;
+	/** Pause/resume requests per note run one after the other, so a late pause never wins over a resume. */
+	private linkOps = new Map<string, Promise<unknown>>();
 	private logSaveTimer: number | null = null;
 	sync!: SyncEngine;
 	builder!: ContentBuilder;
@@ -469,21 +471,50 @@ export default class LinvauPlugin extends Plugin {
 		if (this.app.vault.getAbstractFileByPath(rec.path) instanceof TFile) return;
 		rec.state = "ORPHAN";
 		rec.autoPaused = true;
+		const paused = await this.serial(rec.noteId, async () => {
+			try {
+				await this.api.suspend(rec.noteId);
+				return true;
+			} catch (e) {
+				this.logger.error(`could not pause link on server: ${errMsg(e)}`);
+				return false;
+			}
+		});
 		await this.saveState();
-		try {
-			await this.api.suspend(rec.noteId);
-			this.logger.warn(`file still missing after ${DELETE_GRACE_MS / 60000} min → link paused: ${rec.path}`);
-		} catch (e) {
-			this.logger.error(`could not pause link on server: ${errMsg(e)}`);
+		// The file may have come back (restored, or delivered by the sync) while the pause was on its way.
+		const here = this.app.vault.getAbstractFileByPath(rec.path);
+		const back = here instanceof TFile ? here : this.findRestored(rec);
+		if (back instanceof TFile) {
+			if (rec.state === "ORPHAN") await this.autoResume(back);
+			this.refreshUi();
+			return;
 		}
+		if (paused) this.logger.warn(`file still missing after ${DELETE_GRACE_MS / 60000} min → link paused: ${rec.path}`);
 		this.notify(`Linvau: “${rec.path.split("/").pop()}” was deleted, so its link was paused. It reactivates by itself if the file comes back.`);
 		this.refreshUi();
+	}
+
+	/** Runs pause/resume calls of one note in order. */
+	private serial<T>(noteId: string, fn: () => Promise<T>): Promise<T> {
+		const prev = this.linkOps.get(noteId) ?? Promise.resolve();
+		const next = prev.catch(() => undefined).then(fn);
+		this.linkOps.set(noteId, next);
+		void next.finally(() => { if (this.linkOps.get(noteId) === next) this.linkOps.delete(noteId); }).catch(() => undefined);
+		return next;
 	}
 
 	/**
 	 * A deleted note restored to another folder (e.g. moved back from the trash by hand): if exactly one paused
 	 * note with the same file name is missing, it is the same note — its link follows the file.
 	 */
+	/** Looks for a paused note's file in another folder (same file name, not tracked by another note). */
+	private findRestored(rec: NoteRecord): TFile | null {
+		const name = rec.path.split("/").pop();
+		const tracked = new Set(Object.keys(this.data.notes));
+		const same = this.app.vault.getMarkdownFiles().filter((f) => f.name === name && !tracked.has(f.path));
+		return same.length === 1 && this.restoredElsewhere(same[0]) === rec ? same[0] : null;
+	}
+
 	private restoredElsewhere(f: TFile): NoteRecord | undefined {
 		if (f.extension !== "md") return undefined;
 		const name = f.path.split("/").pop();
@@ -504,7 +535,7 @@ export default class LinvauPlugin extends Plugin {
 		const rec = this.data.notes[file.path];
 		if (!rec) return;
 		try {
-			await this.api.resume(rec.noteId);
+			await this.serial(rec.noteId, () => this.api.resume(rec.noteId));
 			rec.state = "ACTIVE";
 			delete rec.autoPaused;
 			await this.saveState();
@@ -718,7 +749,11 @@ export default class LinvauPlugin extends Plugin {
 		}
 		let changed = 0, missing = 0, drift = 0;
 		for (const [i, rec] of recs.entries()) {
-			const file = this.app.vault.getAbstractFileByPath(rec.path);
+			let file = this.app.vault.getAbstractFileByPath(rec.path);
+			if (!(file instanceof TFile) && rec.state === "ORPHAN" && rec.autoPaused) {
+				// Restored into another folder while the plugin was not running (e.g. dragged back from the trash).
+				file = this.findRestored(rec);
+			}
 			if (!(file instanceof TFile)) {
 				if (rec.state !== "ORPHAN" && !this.pendingDeletes.has(rec.path)) {
 					missing++;
