@@ -6,7 +6,7 @@ import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
 import { ConfirmModal, LinvauSettingTab } from "./settings";
 import { SyncEngine } from "./sync";
 import {
-	DEFAULT_API_BASE, DEFAULT_SETTINGS, LatencySample, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
+	DEFAULT_API_BASE, DEFAULT_SETTINGS, LatencySample, MAX_NOTE_BYTES, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
 } from "./types";
 import { ago, errMsg, fmtMs, percentile } from "./util";
 import { ContentBuilder, type BuildOptions, type Payload } from "./content";
@@ -930,13 +930,21 @@ export default class LinvauPlugin extends Plugin {
 
 	private async createAndPublish(file: TFile, choice: { assetsEnabled: boolean; approvedEmbeds: string[] }) {
 		try {
+			// Too large (P-10): say so before creating a link that could never show the note.
+			const preview = await this.builder.build(file, this.buildOptions(choice));
+			if (preview.bytes > MAX_NOTE_BYTES) {
+				const msg = `“${file.basename}” is ${Math.round(preview.bytes / 1024)} KB; the limit is ${MAX_NOTE_BYTES / 1024} KB (about 200 pages). Split it into several notes to publish it.`;
+				this.logger.warn(`not published, too large: ${file.path} (${Math.round(preview.bytes / 1024)} KB)`);
+				new Notice(`Linvau: ${msg}`, 12_000);
+				return;
+			}
 			const created = await this.api.createNote(file.path, file.basename);
 			const rec: NoteRecord = {
 				noteId: created.noteId, shareId: created.shareId, url: created.url, path: file.path,
 				state: "PUBLISHING", version: 0, hash: null, lastSyncAt: null,
 				assetsEnabled: choice.assetsEnabled, approvedEmbeds: choice.approvedEmbeds,
 				// Embeds the author just saw in the dialog and left unchecked need no second notice.
-				pendingEmbeds: (await this.builder.build(file, this.buildOptions(choice))).pendingEmbeds,
+				pendingEmbeds: preview.pendingEmbeds,
 			};
 			this.data.notes[file.path] = rec;
 			await this.saveState();

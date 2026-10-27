@@ -71,4 +71,5 @@ export const DEFAULT_SETTINGS: LinvauSettings = {
 };
 
 export const MAX_LATENCY_SAMPLES = 500;
-export const MAX_NOTE_BYTES = 1_000_000;
+/** Text limit per note (P-10): 400 KB, about 200 pages. The server checks it too. */
+export const MAX_NOTE_BYTES = 400 * 1024;

@@ -175,7 +175,7 @@ export class SyncEngine {
 				return;
 			}
 			if (payload.bytes > MAX_NOTE_BYTES) {
-				throw new ApiError(413, `Note is ${Math.round(payload.bytes / 1024)} KB; the pilot limit is ${MAX_NOTE_BYTES / 1000} KB.`);
+				throw new ApiError(413, `This note is ${Math.round(payload.bytes / 1024)} KB; the limit is ${MAX_NOTE_BYTES / 1024} KB (about 200 pages). Split it into several notes.`, "note_too_large");
 			}
 			const t0 = Date.now();
 			const savedAt = this.lastSave.get(path) ?? t0;
