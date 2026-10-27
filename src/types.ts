@@ -61,7 +61,10 @@ export interface PluginData {
 }
 
 /** The Linvau server. Built in: users never type it (D-54). */
-export const DEFAULT_API_BASE = "https://linvau-api-mock.linvau.workers.dev";
+export const DEFAULT_API_BASE = "https://api.linvau.com";
+
+/** Earlier built-in addresses of the same server (D-63): a stored copy is treated as "use the built-in one". */
+export const LEGACY_API_BASES = ["https://linvau-api-mock.linvau.workers.dev"];
 
 export const DEFAULT_SETTINGS: LinvauSettings = {
 	apiBase: "",

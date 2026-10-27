@@ -1,7 +1,7 @@
 import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type LinvauPlugin from "./main";
 import { errMsg } from "./util";
-import { DEFAULT_API_BASE } from "./types";
+import { DEFAULT_API_BASE, LEGACY_API_BASES } from "./types";
 
 export class LinvauSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: LinvauPlugin) {
@@ -134,7 +134,7 @@ export class LinvauSettingTab extends PluginSettingTab {
 
 	private async setApiBase(raw: string) {
 		const v = raw.trim().replace(/\/+$/, "");
-		const next = v === DEFAULT_API_BASE ? "" : v;
+		const next = v === DEFAULT_API_BASE || LEGACY_API_BASES.includes(v) ? "" : v;
 		if (next && !/^https?:\/\/[^\s/]+/.test(next)) { new Notice("Linvau: enter a full address, like https://example.workers.dev"); return; }
 		if (next === this.plugin.data.settings.apiBase) return;
 		this.plugin.data.settings.apiBase = next;

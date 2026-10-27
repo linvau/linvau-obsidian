@@ -6,7 +6,7 @@ import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
 import { ConfirmModal, LinvauSettingTab } from "./settings";
 import { SyncEngine } from "./sync";
 import {
-	DEFAULT_API_BASE, DEFAULT_SETTINGS, LatencySample, MAX_NOTE_BYTES, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
+	DEFAULT_API_BASE, DEFAULT_SETTINGS, LEGACY_API_BASES, LatencySample, MAX_NOTE_BYTES, MAX_LATENCY_SAMPLES, NoteRecord, PluginData,
 } from "./types";
 import { ago, errMsg, fmtMs, percentile } from "./util";
 import { ContentBuilder, type BuildOptions, type Payload } from "./content";
@@ -152,7 +152,8 @@ export default class LinvauPlugin extends Plugin {
 		};
 		// 0.1.8: the server address is built in. A stored copy of it is dropped so future defaults apply.
 		const stored = this.data.settings.apiBase.trim().replace(/\/+$/, "");
-		this.data.settings.apiBase = stored === DEFAULT_API_BASE ? "" : stored;
+		// 0.1.12: the API moved to api.linvau.com; the old workers.dev address is the same server.
+		this.data.settings.apiBase = stored === DEFAULT_API_BASE || LEGACY_API_BASES.includes(stored) ? "" : stored;
 	}
 
 	/** The server this device talks to: the built-in one unless a development URL is set. */
