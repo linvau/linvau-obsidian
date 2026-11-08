@@ -13,7 +13,7 @@ export const isAuthLost = (e: unknown) => e instanceof ApiError && e.status === 
 
 export interface CreatedNote { noteId: string; shareId: string; url: string; state: string; }
 export interface PublishedVersion { version: number; publishedAt: string; url: string; unchanged?: boolean; renderMs?: number; assets?: number; panel?: number; }
-export interface RemoteNote { noteId: string; shareId: string; url: string; state: string; version: number; hash: string | null; path: string; updatedAt: string; }
+export interface RemoteNote { noteId: string; shareId: string; url: string; state: string; version: number; hash: string | null; path: string; updatedAt: string; protected?: boolean }
 export interface Me { ok: boolean; owner: string; legacy: boolean; user: { id: string; email: string } | null; device: { id: string } | null }
 export interface LoginResult {
 	accessToken: string; accessExpiresAt: string; refreshToken: string; refreshExpiresAt: string;
@@ -121,4 +121,7 @@ export class LinvauApi {
 	resume(id: string) { return this.authed<{ state: string }>("POST", `/v1/notes/${id}/resume`); }
 	regenerate(id: string) { return this.authed<{ shareId: string; url: string }>("POST", `/v1/notes/${id}/regenerate`); }
 	remove(id: string) { return this.authed<{ ok: boolean }>("DELETE", `/v1/notes/${id}`); }
+	/** API 0.4.0: readers must enter this password. Changing it signs out everyone who opened the note. */
+	setPassword(id: string, password: string) { return this.authed<{ protected: boolean }>("PUT", `/v1/notes/${id}/password`, { body: { password } }); }
+	removePassword(id: string) { return this.authed<{ protected: boolean }>("DELETE", `/v1/notes/${id}/password`); }
 }

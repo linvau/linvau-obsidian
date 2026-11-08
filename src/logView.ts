@@ -68,7 +68,7 @@ export class LinvauLogView extends ItemView {
 			const row = list.createDiv({ cls: "linvau-note-row" });
 			row.createSpan({ cls: `linvau-badge state-${r.state.toLowerCase()}`, text: r.state });
 			row.createSpan({ cls: "linvau-remote-path", text: r.path });
-			row.createSpan({ cls: "linvau-muted", text: ` v${r.version} · ${ago(Date.parse(r.updatedAt) || null)}` });
+			row.createSpan({ cls: "linvau-muted", text: ` v${r.version} · ${ago(Date.parse(r.updatedAt) || null)}${r.protected ? " · password-protected" : ""}` });
 			const actions = row.createDiv({ cls: "linvau-row-actions" });
 			const act = (label: string, icon: string, run: () => void | Promise<void>, warning = false) => {
 				const b = actions.createEl("button", { attr: { "aria-label": label } });
@@ -178,7 +178,7 @@ export class LinvauLogView extends ItemView {
 					ev.preventDefault();
 					void this.app.workspace.openLinkText(n.path, "", false);
 				});
-				row.createSpan({ cls: "linvau-muted", text: ` v${n.version} · ${ago(n.lastSyncAt)}` });
+				row.createSpan({ cls: "linvau-muted", text: ` v${n.version} · ${ago(n.lastSyncAt)}${n.protected ? " · password-protected" : ""}` });
 				if (n.lastError) row.createDiv({ cls: "linvau-error", text: n.lastError });
 				if (n.state === "ORPHAN" && !this.app.vault.getAbstractFileByPath(n.path)) {
 					const box = row.createDiv({ cls: "linvau-orphan" });

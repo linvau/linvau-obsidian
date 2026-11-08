@@ -26,6 +26,8 @@ export interface NoteRecord {
 	serverHash?: string | null;
 	/** The author chose "publish this device's version" for a conflict. */
 	forcePublish?: boolean;
+	/** Readers need a password to open the link (API 0.4.0). Known from the server; the password itself is never stored here. */
+	protected?: boolean;
 }
 
 export interface LinvauSettings {

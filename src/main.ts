@@ -13,6 +13,7 @@ import { ContentBuilder, type BuildOptions, type Payload } from "./content";
 import { EmbedsModal } from "./embedsModal";
 import { LEGACY_TOKEN_KEY, Session } from "./session";
 import { ConnectModal, connectedNotice } from "./connectModal";
+import { PasswordModal } from "./passwordModal";
 
 /** How long a removed file may stay away before its link is paused (sync tools replace files as delete + create). */
 const DELETE_GRACE_MS = 5 * 60_000;
@@ -256,6 +257,8 @@ export default class LinvauPlugin extends Plugin {
 				this.logger.info(`no longer published (unpublished from another device): ${rec.path}`);
 				continue;
 			}
+			// Password set or removed on another device (servers before 0.4.0 do not report it).
+			if (typeof r.protected === "boolean") rec.protected = r.protected;
 			if (r.path !== rec.path && !this.data.notes[r.path]) {
 				const f = this.app.vault.getAbstractFileByPath(r.path);
 				if (f instanceof TFile) {
@@ -812,6 +815,15 @@ export default class LinvauPlugin extends Plugin {
 			checkCallback: withActive((f) => this.confirmRegenerate(f), true) });
 		this.addCommand({ id: "unpublish-current", name: "Unpublish current note", icon: "x-circle",
 			checkCallback: withActive((f) => this.confirmUnpublish(f), true) });
+		this.addCommand({ id: "set-password", name: "Set or change password of current note…", icon: "lock",
+			checkCallback: withActive((f) => this.openPassword(f), true) });
+		this.addCommand({ id: "remove-password", name: "Remove password of current note", icon: "unlock",
+			checkCallback: (checking: boolean) => {
+				const f = this.app.workspace.getActiveFile();
+				if (!f || !this.data.notes[f.path]?.protected) return false;
+				if (!checking) this.confirmRemovePassword(f);
+				return true;
+			} });
 		this.addCommand({ id: "embedded-content", name: "Embedded content of current note…", icon: "layers",
 			checkCallback: withActive((f) => void this.openEmbeds(f), true) });
 		this.addCommand({ id: "open-panel", name: "Open pilot panel", icon: "radio", callback: () => void this.openLogView() });
@@ -879,6 +891,10 @@ export default class LinvauPlugin extends Plugin {
 			add("Linvau: pause link", "pause", () => void this.suspend(file));
 			const n = rec.pendingEmbeds?.length ?? 0;
 			add(`Linvau: embedded content…${n ? ` (${n} pending)` : ""}`, "layers", () => void this.openEmbeds(file));
+		}
+		if (rec.state !== "CONFLICT") {
+			add(rec.protected ? "Linvau: change password…" : "Linvau: protect with a password…", "lock", () => this.openPassword(file));
+			if (rec.protected) add("Linvau: remove password…", "unlock", () => this.confirmRemovePassword(file));
 		}
 		add("Linvau: regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
 		add("Linvau: unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
@@ -979,7 +995,7 @@ export default class LinvauPlugin extends Plugin {
 		if (!rec) return;
 		try {
 			await navigator.clipboard.writeText(rec.url);
-			new Notice(`Linvau: link copied — v${rec.version}, ${rec.state.toLowerCase()}`);
+			new Notice(`Linvau: link copied — v${rec.version}, ${rec.state.toLowerCase()}${rec.protected ? ", password-protected" : ""}`);
 		} catch {
 			new Notice(`Linvau link: ${rec.url}`, 10_000);
 		}
@@ -1014,6 +1030,52 @@ export default class LinvauPlugin extends Plugin {
 			this.sync.markDirty(file.path, "resume");
 			await this.sync.flush(file.path);
 			new Notice("Linvau: link active again (same link and QR).");
+		} catch (e) {
+			new Notice(`Linvau: ${errMsg(e)}`);
+		}
+		this.refreshUi();
+	}
+
+	openPassword(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		new PasswordModal(this.app, file.basename, !!rec.protected, async (password) => {
+			try {
+				await this.api.setPassword(rec.noteId, password);
+				const changed = !!rec.protected;
+				rec.protected = true;
+				await this.saveState();
+				this.logger.info(`password ${changed ? "changed" : "set"}: ${file.path}`);
+				new Notice(changed
+					? "Linvau: password changed. Readers must enter the new one."
+					: "Linvau: the link now asks for a password. Share it separately from the link.");
+				this.refreshUi();
+				return true;
+			} catch (e) {
+				const code = e instanceof ApiError ? e.code : undefined;
+				new Notice(code === undefined && e instanceof ApiError && e.status === 404
+					? "Linvau: the server does not support passwords yet (needs API 0.4.0)."
+					: `Linvau: ${errMsg(e)}`);
+				return false;
+			}
+		}).open();
+	}
+
+	private confirmRemovePassword(file: TFile) {
+		this.confirm("Remove the password?",
+			"Anyone who has the link will be able to open the note again, without a password.",
+			"Remove password", () => void this.removePassword(file));
+	}
+
+	async removePassword(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		try {
+			await this.api.removePassword(rec.noteId);
+			rec.protected = false;
+			await this.saveState();
+			this.logger.info(`password removed: ${file.path}`);
+			new Notice("Linvau: password removed. The link opens for anyone who has it.");
 		} catch (e) {
 			new Notice(`Linvau: ${errMsg(e)}`);
 		}
