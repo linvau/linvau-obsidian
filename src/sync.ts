@@ -210,6 +210,8 @@ export class SyncEngine {
 			const current = plugin.data.notes[path] ?? rec;
 			current.version = res.version;
 			current.hash = payload.hash;
+			// Servers before 0.5.0 do not send "pending": the save went live.
+			current.pendingVersion = res.pending?.version ?? null;
 			current.lastSyncAt = now;
 			current.state = "ACTIVE";
 			delete current.lastError;
@@ -220,7 +222,10 @@ export class SyncEngine {
 			this.delayCause.delete(path);
 
 			if (res.unchanged) {
-				plugin.logger.info(`server already had this content (v${res.version}): ${path}`);
+				plugin.logger.info(`server already had this content (v${res.version}${res.pending ? `, pending v${res.pending.version}` : ""}): ${path}`);
+			} else if (res.pending) {
+				// Review mode: not live, so it does not count for the sync latency metric.
+				plugin.logger.info(`pending v${res.pending.version} saved for review (readers still see v${res.version}), API ${fmtMs(api)}: ${path}`);
 			} else {
 				plugin.recordLatency({ ts: now, sinceLastSave, sinceFirstSave, api, bytes: payload.bytes, ...(cause ? { cause } : {}) });
 				const burst = sinceFirstSave - sinceLastSave > 1000 ? ` (editing session ${fmtMs(sinceFirstSave)})` : "";

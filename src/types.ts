@@ -28,6 +28,10 @@ export interface NoteRecord {
 	forcePublish?: boolean;
 	/** Readers need a password to open the link (API 0.4.0). Known from the server; the password itself is never stored here. */
 	protected?: boolean;
+	/** Live: every save is published. Review: saves wait as a pending version until "Publish revision" (API 0.5.0). */
+	mode?: "LIVE" | "REVIEW";
+	/** Number of the pending version waiting for review (Review mode), if any. */
+	pendingVersion?: number | null;
 }
 
 export interface LinvauSettings {

@@ -12,8 +12,18 @@ export const AUTH_LOST_CODES = new Set(["not_connected", "session_expired", "dev
 export const isAuthLost = (e: unknown) => e instanceof ApiError && e.status === 401 && AUTH_LOST_CODES.has(e.code ?? "");
 
 export interface CreatedNote { noteId: string; shareId: string; url: string; state: string; }
-export interface PublishedVersion { version: number; publishedAt: string; url: string; unchanged?: boolean; renderMs?: number; assets?: number; panel?: number; }
-export interface RemoteNote { noteId: string; shareId: string; url: string; state: string; version: number; hash: string | null; path: string; updatedAt: string; protected?: boolean }
+export interface PendingInfo { version: number; hash: string; at: string }
+export interface PublishedVersion { version: number; publishedAt: string; url: string; unchanged?: boolean; renderMs?: number; assets?: number; panel?: number;
+	/** API 0.5.0, Review mode: the save is waiting as this pending version (null: nothing pending). */
+	pending?: PendingInfo | null; }
+export type NoteMode = "LIVE" | "REVIEW";
+export interface ReviewInfo {
+	mode: NoteMode;
+	published: { version: number; title: string; markdown: string; publishedAt: string } | null;
+	pending: { version: number; title: string; markdown: string; hash: string; at: string } | null;
+	previewUrl: string | null;
+}
+export interface RemoteNote { noteId: string; shareId: string; url: string; state: string; version: number; hash: string | null; path: string; updatedAt: string; protected?: boolean; mode?: NoteMode; pendingVersion?: number | null; pendingHash?: string | null }
 export interface Me { ok: boolean; owner: string; legacy: boolean; user: { id: string; email: string } | null; device: { id: string } | null }
 export interface LoginResult {
 	accessToken: string; accessExpiresAt: string; refreshToken: string; refreshExpiresAt: string;
@@ -123,5 +133,12 @@ export class LinvauApi {
 	remove(id: string) { return this.authed<{ ok: boolean }>("DELETE", `/v1/notes/${id}`); }
 	/** API 0.4.0: readers must enter this password. Changing it signs out everyone who opened the note. */
 	setPassword(id: string, password: string) { return this.authed<{ protected: boolean }>("PUT", `/v1/notes/${id}/password`, { body: { password } }); }
+	/** API 0.5.0. Leaving Review with pending changes needs pending: "publish" or "discard". */
+	setMode(id: string, mode: NoteMode, pending?: "publish" | "discard") {
+		return this.authed<{ mode: NoteMode; published?: { version: number; publishedAt: string } }>("PUT", `/v1/notes/${id}/mode`, { body: { mode, ...(pending ? { pending } : {}) } });
+	}
+	review(id: string) { return this.authed<ReviewInfo>("GET", `/v1/notes/${id}/review`); }
+	publishRevision(id: string, hash: string) { return this.authed<{ version: number; publishedAt: string; url: string }>("POST", `/v1/notes/${id}/publish-revision`, { body: { hash } }); }
+	discardPending(id: string) { return this.authed<{ ok: boolean }>("DELETE", `/v1/notes/${id}/pending`); }
 	removePassword(id: string) { return this.authed<{ protected: boolean }>("DELETE", `/v1/notes/${id}/password`); }
 }

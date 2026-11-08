@@ -11,6 +11,8 @@
     "moduleResolution": "node",
     "importHelpers": true,
     "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
     "lib": ["DOM", "ES2020"]
   },
   "include": ["src/**/*.ts"]

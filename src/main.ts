@@ -14,6 +14,8 @@ import { EmbedsModal } from "./embedsModal";
 import { LEGACY_TOKEN_KEY, Session } from "./session";
 import { ConnectModal, connectedNotice } from "./connectModal";
 import { PasswordModal } from "./passwordModal";
+import { ReviewModal } from "./reviewModal";
+import { QrModal } from "./qrModal";
 
 /** How long a removed file may stay away before its link is paused (sync tools replace files as delete + create). */
 const DELETE_GRACE_MS = 5 * 60_000;
@@ -259,6 +261,11 @@ export default class LinvauPlugin extends Plugin {
 			}
 			// Password set or removed on another device (servers before 0.4.0 do not report it).
 			if (typeof r.protected === "boolean") rec.protected = r.protected;
+			// Review mode and pending version, possibly changed on another device (API 0.5.0).
+			if (r.mode) rec.mode = r.mode;
+			if (r.pendingVersion !== undefined) rec.pendingVersion = r.pendingVersion;
+			// A revision published from another device with the content this device already has.
+			if (r.hash && r.hash === rec.hash && r.version > rec.version) rec.version = r.version;
 			if (r.path !== rec.path && !this.data.notes[r.path]) {
 				const f = this.app.vault.getAbstractFileByPath(r.path);
 				if (f instanceof TFile) {
@@ -815,6 +822,25 @@ export default class LinvauPlugin extends Plugin {
 			checkCallback: withActive((f) => this.confirmRegenerate(f), true) });
 		this.addCommand({ id: "unpublish-current", name: "Unpublish current note", icon: "x-circle",
 			checkCallback: withActive((f) => this.confirmUnpublish(f), true) });
+		const recOf = (f: TFile | null) => (f ? this.data.notes[f.path] : undefined);
+		const when = (ok: (rec: NoteRecord) => boolean, fn: (f: TFile) => void) => (checking: boolean) => {
+			const f = this.app.workspace.getActiveFile();
+			const rec = recOf(f);
+			if (!f || !rec || !ok(rec)) return false;
+			if (!checking) fn(f);
+			return true;
+		};
+		const usable = (r: NoteRecord) => r.state === "ACTIVE" || r.state === "ERROR" || r.state === "PUBLISHING";
+		this.addCommand({ id: "show-qr", name: "QR code of current note…", icon: "qr-code",
+			checkCallback: when((r) => r.state !== "ORPHAN", (f) => this.showQr(f)) });
+		this.addCommand({ id: "mode-review", name: "Switch current note to Review mode (changes wait for approval)", icon: "eye",
+			checkCallback: when((r) => usable(r) && r.mode !== "REVIEW", (f) => void this.setMode(f, "REVIEW")) });
+		this.addCommand({ id: "mode-live", name: "Switch current note to Live mode", icon: "radio",
+			checkCallback: when((r) => usable(r) && r.mode === "REVIEW", (f) => void this.setMode(f, "LIVE")) });
+		this.addCommand({ id: "publish-revision", name: "Publish revision of current note…", icon: "send",
+			checkCallback: when((r) => r.mode === "REVIEW" && r.state !== "ORPHAN", (f) => void this.openReview(f)) });
+		this.addCommand({ id: "discard-pending", name: "Discard pending changes of current note", icon: "undo-2",
+			checkCallback: when((r) => r.mode === "REVIEW" && !!r.pendingVersion, (f) => this.confirmDiscard(f)) });
 		this.addCommand({ id: "set-password", name: "Set or change password of current note…", icon: "lock",
 			checkCallback: withActive((f) => this.openPassword(f), true) });
 		this.addCommand({ id: "remove-password", name: "Remove password of current note", icon: "unlock",
@@ -874,7 +900,8 @@ export default class LinvauPlugin extends Plugin {
 			return;
 		}
 		// P8: the author sees which version is live right in the menu.
-		menu.addItem((i) => i.setSection("linvau").setTitle(`Linvau · v${rec.version} · ${rec.state.toLowerCase()} · ${ago(rec.lastSyncAt)}`)
+		const review = rec.mode === "REVIEW" ? ` · review${rec.pendingVersion ? ` (v${rec.pendingVersion} pending)` : ""}` : "";
+		menu.addItem((i) => i.setSection("linvau").setTitle(`Linvau · v${rec.version} · ${rec.state.toLowerCase()}${review} · ${ago(rec.lastSyncAt)}`)
 			.setIcon("info").setDisabled(true));
 
 		if (rec.state === "CONFLICT") {
@@ -884,10 +911,19 @@ export default class LinvauPlugin extends Plugin {
 			add("Linvau: resume link", "play", () => void this.resume(file));
 		} else if (rec.state === "SUSPENDED") {
 			add("Linvau: copy link", "link", () => void this.copyLink(rec));
+			add("Linvau: QR code…", "qr-code", () => this.showQr(file));
 			add("Linvau: resume link", "play", () => void this.resume(file));
 		} else {
-			add("Linvau: sync now", "refresh-cw", () => void this.publish(file));
+			if (rec.mode === "REVIEW") {
+				add(`Linvau: publish revision…${rec.pendingVersion ? ` (v${rec.pendingVersion})` : ""}`, "send", () => void this.openReview(file));
+				if (rec.pendingVersion) add("Linvau: discard pending changes…", "undo-2", () => this.confirmDiscard(file));
+				add("Linvau: switch to Live mode", "radio", () => void this.setMode(file, "LIVE"));
+			} else {
+				add("Linvau: sync now", "refresh-cw", () => void this.publish(file));
+				add("Linvau: switch to Review mode", "eye", () => void this.setMode(file, "REVIEW"));
+			}
 			add("Linvau: copy link", "link", () => void this.copyLink(rec));
+			add("Linvau: QR code…", "qr-code", () => this.showQr(file));
 			add("Linvau: pause link", "pause", () => void this.suspend(file));
 			const n = rec.pendingEmbeds?.length ?? 0;
 			add(`Linvau: embedded content…${n ? ` (${n} pending)` : ""}`, "layers", () => void this.openEmbeds(file));
@@ -1030,6 +1066,121 @@ export default class LinvauPlugin extends Plugin {
 			this.sync.markDirty(file.path, "resume");
 			await this.sync.flush(file.path);
 			new Notice("Linvau: link active again (same link and QR).");
+		} catch (e) {
+			new Notice(`Linvau: ${errMsg(e)}`);
+		}
+		this.refreshUi();
+	}
+
+	// ─────────────────────────────── Review mode and QR (plugin 0.3.0, API 0.5.0)
+
+	showQr(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (rec) new QrModal(this.app, file.basename, file.path, rec.url).open();
+	}
+
+	async setMode(file: TFile, mode: "LIVE" | "REVIEW", pending?: "publish" | "discard") {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		if (mode === "LIVE" && !pending && rec.mode === "REVIEW") {
+			// Upload the last save first, so the choice is about the real pending text.
+			if (this.sync.isDirty(file.path) || this.sync.isInFlight(file.path)) await this.sync.flush(file.path);
+			if (rec.pendingVersion) {
+				new ChoiceModal(this.app, "Switch to Live mode?", [
+					`Version ${rec.pendingVersion} is waiting for review. Readers still see version ${rec.version}.`,
+					"In Live mode every save is published right away.",
+				], [
+					{ label: "Discard and switch", warning: true, run: () => void this.setMode(file, "LIVE", "discard") },
+					{ label: `Publish v${rec.pendingVersion} and switch`, cta: true, run: () => void this.setMode(file, "LIVE", "publish") },
+				]).open();
+				return;
+			}
+		}
+		try {
+			const res = await this.api.setMode(rec.noteId, mode, pending);
+			rec.mode = mode;
+			if (mode === "LIVE") {
+				if (res.published) rec.version = res.published.version;
+				rec.pendingVersion = null;
+			}
+			await this.saveState();
+			this.logger.info(`mode ${mode.toLowerCase()}${res.published ? ` (published v${res.published.version})` : pending === "discard" ? " (pending changes discarded)" : ""}: ${file.path}`);
+			new Notice(mode === "REVIEW"
+				? "Linvau: Review mode. Your saves wait as a pending version; readers see it only after “Publish revision”."
+				: `Linvau: Live mode. Every save is published right away.${res.published ? ` Version ${res.published.version} is live.` : ""}`);
+			if (mode === "LIVE") {
+				// Anything edited after the discarded or published version goes live now.
+				this.sync.markDirty(file.path, "live mode");
+				this.sync.schedule(file.path, 0);
+			}
+		} catch (e) {
+			new Notice(e instanceof ApiError && e.status === 404 && !e.code
+				? "Linvau: the server does not support Review mode yet (needs API 0.5.0)."
+				: `Linvau: ${errMsg(e)}`);
+		}
+		this.refreshUi();
+	}
+
+	async openReview(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		try {
+			if (this.sync.isDirty(file.path) || this.sync.isInFlight(file.path)) await this.sync.flush(file.path);
+			const info = await this.api.review(rec.noteId);
+			rec.pendingVersion = info.pending?.version ?? null;
+			if (!info.pending) {
+				new Notice(`Linvau: nothing to publish. Readers already see your latest version (v${rec.version}).`);
+				this.refreshUi();
+				return;
+			}
+			new ReviewModal(this.app, file.basename, info, {
+				publish: async () => {
+					try {
+						const res = await this.api.publishRevision(rec.noteId, info.pending!.hash);
+						rec.version = res.version;
+						rec.pendingVersion = null;
+						rec.lastSyncAt = Date.now();
+						await this.saveState();
+						this.logger.info(`revision published: v${res.version} live: ${file.path}`);
+						new Notice(`Linvau: version ${res.version} published. Readers with the page open see it within seconds.`);
+						this.refreshUi();
+						return true;
+					} catch (e) {
+						if (e instanceof ApiError && e.code === "pending_changed") {
+							new Notice("Linvau: the note changed while you were reviewing it. Showing the new changes.");
+							window.setTimeout(() => void this.openReview(file), 300);
+							return true;
+						}
+						new Notice(`Linvau: ${errMsg(e)}`);
+						return false;
+					}
+				},
+				discard: () => this.confirmDiscard(file),
+			}).open();
+		} catch (e) {
+			new Notice(e instanceof ApiError && e.status === 404 && !e.code
+				? "Linvau: the server does not support Review mode yet (needs API 0.5.0)."
+				: `Linvau: ${errMsg(e)}`);
+		}
+	}
+
+	private confirmDiscard(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		this.confirm("Discard pending changes?",
+			`Readers keep version ${rec.version}. Your note in Obsidian is not changed: your next edit creates a new pending version.`,
+			"Discard", () => void this.discardPending(file));
+	}
+
+	async discardPending(file: TFile) {
+		const rec = this.data.notes[file.path];
+		if (!rec) return;
+		try {
+			await this.api.discardPending(rec.noteId);
+			rec.pendingVersion = null;
+			await this.saveState();
+			this.logger.info(`pending changes discarded (readers keep v${rec.version}): ${file.path}`);
+			new Notice("Linvau: pending changes discarded.");
 		} catch (e) {
 			new Notice(`Linvau: ${errMsg(e)}`);
 		}
@@ -1246,6 +1397,7 @@ export default class LinvauPlugin extends Plugin {
 		else if (rec.state === "CONFLICT") text = "Linvau · conflict · choose which version stays";
 		else if (rec.conflictSince) text = `Linvau · waiting for the vault sync (v${rec.serverVersion} from another device)`;
 		else if (rec.state === "ERROR") text = `Linvau · error · v${rec.version} live`;
+		else if (rec.mode === "REVIEW") text = `Linvau · v${rec.version} live · review${this.sync.isDirty(f.path) ? " · saving changes" : rec.pendingVersion ? ` · v${rec.pendingVersion} pending` : " · up to date"}`;
 		else if (this.sync.isDirty(f.path)) text = `Linvau · v${rec.version} live · changes pending`;
 		else text = `Linvau · v${rec.version} · ${ago(rec.lastSyncAt)}`;
 		const pending = rec.pendingEmbeds?.length ?? 0;

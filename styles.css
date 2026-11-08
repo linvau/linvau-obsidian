@@ -67,3 +67,9 @@
 .linvau-row-actions .linvau-btn-icon svg { width: 14px; height: 14px; }
 .linvau-advanced { margin-top: var(--size-4-4); border-top: 1px solid var(--background-modifier-border); padding-top: var(--size-4-2); }
 .linvau-advanced > summary { cursor: pointer; font-weight: var(--font-semibold); padding: var(--size-4-1) 0; }
+.linvau-qr { display: block; width: min(320px, 100%); height: auto; margin: 0 auto var(--size-4-2); image-rendering: pixelated; border-radius: var(--radius-s); }
+.linvau-review .linvau-diff { max-height: 280px; overflow: auto; font-size: var(--font-ui-smaller); padding: var(--size-4-2); background: var(--background-secondary); border-radius: var(--radius-s); white-space: pre-wrap; }
+.linvau-review .linvau-add { color: var(--color-green); }
+.linvau-review .linvau-del { color: var(--color-red); text-decoration: line-through; }
+.linvau-review-sections { margin: 0 0 var(--size-4-2); font-size: var(--font-ui-small); }
+.linvau-badge.state-review { background: var(--color-orange); color: var(--text-on-accent); }
