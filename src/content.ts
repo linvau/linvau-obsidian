@@ -176,14 +176,19 @@ export class ContentBuilder {
 			const [linkpath, ...sub] = target.split("#");
 			const subpath = sub.join("#");
 			const dest = linkpath.trim() ? this.app.metadataCache.getFirstLinkpathDest(linkpath.trim(), source.path) : null;
-			if (!dest) return PLACEHOLDER;
+			if (!dest) {
+				// Shown in the "Embedded content" dialog, so the author knows why it is missing.
+				if (linkpath.trim() && depth === 0) skipped.push(`${linkpath.trim()}: not found in the vault`);
+				return PLACEHOLDER;
+			}
 			const ext = dest.extension.toLowerCase();
 
 			if (IMAGE_EXT.has(ext) || FILE_EXT.has(ext)) {
 				if (!opts.assetsEnabled) return PLACEHOLDER;
 				const ref = await useAsset(dest);
 				if (!ref) return PLACEHOLDER;
-				const clean = (s: string) => s.replace(/[[\]\n]/g, " ").trim();
+				// "|" is removed too: the embed may sit inside a table cell.
+				const clean = (s: string) => s.replace(/[[\]\n|]/g, " ").trim();
 				return ref.image
 					? `![${clean(label)}](linvau-asset:${ref.hash}${width ? `#w=${width}` : ""})`
 					: `[${clean(label) || clean(dest.name)}](linvau-asset:${ref.hash})`;
@@ -220,7 +225,8 @@ export class ContentBuilder {
 				text = text.replace(/%%[\s\S]*?%%/g, "").replace(/[ \t]\^[A-Za-z0-9-]+[ \t]*$/gm, "");
 				// ![[file]]  ![[file|alt]]  ![[image.png|300]]  ![[note#heading]]
 				text = await replaceAsync(text, /!\[\[([^\]\n]+?)\]\]/g, async (m) => {
-					const [target, ...rest] = m[1].split("|");
+					// Inside a table the separator is written "\|" (Obsidian's own rule), so the backslash is not part of the name.
+					const [target, ...rest] = m[1].split(/\\?\|/);
 					const tail = rest.join("|").trim();
 					const size = tail.match(/^(\d{1,4})(?:x\d{1,4})?$/);
 					return renderEmbed(target, size ? "" : tail, size?.[1], source, depth);
@@ -231,7 +237,7 @@ export class ContentBuilder {
 					if (/^(https?:|data:|linvau-asset:)/i.test(destRaw)) return m[0];
 					let decoded = destRaw;
 					try { decoded = decodeURIComponent(destRaw); } catch { /* keep as written */ }
-					const [alt, w] = m[1].split("|");
+					const [alt, w] = m[1].split(/\\?\|/);
 					return renderEmbed(decoded, alt ?? "", /^\d{1,4}$/.test(w ?? "") ? w : undefined, source, depth);
 				});
 				return text;
@@ -293,7 +299,7 @@ export class ContentBuilder {
 			}
 			if (!target) continue;
 
-			const wiki = target.match(/^\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]$/);
+			const wiki = target.replace(/\\\|/g, "|").match(/^\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]$/);
 			if (wiki) {
 				const dest = this.app.metadataCache.getFirstLinkpathDest(wiki[1].trim(), file.path);
 				if (!dest) { skipped.push(`Side panel: “${wiki[1]}” was not found`); continue; }
