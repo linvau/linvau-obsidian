@@ -105,6 +105,15 @@ export class LinvauSettingTab extends PluginSettingTab {
 					}));
 
 		new Setting(containerEl)
+			.setName("Publish note styles")
+			.setDesc("Readers see the CSS snippet rules that style the classes a note uses (cssclasses property or class=\"…\" in HTML). Only those rules are sent; the server keeps layout and text properties and drops anything that could affect the page around the note. Fonts from a curated list (Montserrat, Inter, Lora…) are served by Linvau.")
+			.addToggle((t) =>
+				t.setValue(this.plugin.data.settings.publishStyles !== false).onChange(async (v) => {
+					this.plugin.data.settings.publishStyles = v;
+					await this.plugin.saveState();
+				}));
+
+		new Setting(containerEl)
 			.setName("Verbose log")
 			.setDesc("Also log every save event and skipped (unchanged) syncs.")
 			.addToggle((t) =>

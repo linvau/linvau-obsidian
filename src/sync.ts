@@ -198,7 +198,7 @@ export class SyncEngine {
 
 			const res = await plugin.api.publishVersion(rec.noteId, {
 				title: payload.title, markdown: payload.markdown, hash: payload.hash,
-				assets: payload.assets.map((a) => a.hash), panel: payload.panel,
+				assets: payload.assets.map((a) => a.hash), panel: payload.panel, ...(payload.style ? { style: payload.style } : {}),
 				baseVersion: rec.version, ...(rec.forcePublish ? { force: true } : {}),
 			});
 			const now = Date.now();

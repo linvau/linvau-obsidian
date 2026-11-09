@@ -30,13 +30,19 @@ export interface Payload {
 	skipped: string[];
 	/** Files this note's published content depends on, besides itself. */
 	deps: string[];
+	/** Note styles (API 0.7.0): classes the note uses and the snippet CSS that mentions them. */
+	style?: NoteStyle;
 }
+
+export interface NoteStyle { cssclasses: string[]; classes: string[]; css: string }
 
 export interface BuildOptions {
 	assetsEnabled: boolean;
 	approvedEmbeds: Set<string>;
 	/** Returns the Linvau note id if that vault path is published and active (for side-panel notes). */
 	publishedNoteId: (path: string) => string | null;
+	/** Send the CSS snippet rules for the classes this note uses. */
+	stylesEnabled?: boolean;
 }
 
 const IMAGE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "avif", "svg"]);
@@ -262,7 +268,8 @@ export class ContentBuilder {
 
 		const markdown = await transform(body, file, 0);
 		const panel = await this.buildPanel(props, file, opts, useAsset, skipped);
-		const hash = await sha256Hex(`${title}\n\u0000\n${markdown}\n\u0000\n${JSON.stringify(panel)}`);
+		const style = opts.stylesEnabled === false ? undefined : await this.buildStyle(props, markdown, file, opts, useAsset, skipped);
+		const hash = await sha256Hex(`${title}\n\u0000\n${markdown}\n\u0000\n${JSON.stringify(panel)}${style ? `\n\u0000\n${JSON.stringify(style)}` : ""}`);
 
 		return {
 			title, markdown, hash,
@@ -273,7 +280,55 @@ export class ContentBuilder {
 			includedEmbeds: [...included],
 			skipped,
 			deps: [...deps],
+			...(style ? { style } : {}),
 		};
+	}
+
+	/**
+	 * Note styles. Obsidian applies enabled CSS snippets to every note; a published note takes only the
+	 * snippets that mention a class this note uses (its cssclasses property, or class="…" in its HTML).
+	 * Images referenced with url(…) are published like any attachment. The server then keeps only the
+	 * rules for those classes, scoped to the note, with an allowlist of properties.
+	 */
+	private async buildStyle(props: Record<string, unknown>, markdown: string, file: TFile, opts: BuildOptions,
+		useAsset: (f: TFile) => Promise<AssetRef | null>, skipped: string[]): Promise<NoteStyle | undefined> {
+		const list = (v: unknown) => (Array.isArray(v) ? v : typeof v === "string" ? v.split(/[\s,]+/) : []).map(String).map((x) => x.trim()).filter((x) => /^[A-Za-z_][\w-]{0,63}$/.test(x));
+		const cssclasses = [...new Set([...list(props.cssclasses), ...list(props.cssclass)])].slice(0, 20);
+		const html = new Set<string>();
+		for (const m of markdown.matchAll(/\bclass\s*=\s*("([^"]*)"|'([^']*)')/gi)) for (const c of list(m[2] ?? m[3])) html.add(c);
+		const classes = [...new Set([...cssclasses, ...html])].slice(0, 40);
+		if (!classes.length) return undefined;
+
+		const custom = (this.app as unknown as { customCss?: { enabledSnippets?: Set<string> } }).customCss;
+		const enabled = [...(custom?.enabledSnippets ?? new Set<string>())];
+		const mentions = (css: string) => classes.some((c) => new RegExp(`\\.${c.replace(/[-]/g, "\\-")}(?![\\w-])`).test(css));
+		let css = "";
+		for (const name of enabled.sort()) {
+			const path = `${this.app.vault.configDir}/snippets/${name}.css`;
+			try {
+				if (!(await this.app.vault.adapter.exists(path))) continue;
+				const text = await this.app.vault.adapter.read(path);
+				if (!mentions(text)) continue;
+				if (css.length + text.length > 200_000) { skipped.push(`snippet ${name}.css: too large to publish with the note`); continue; }
+				css += `\n${text}`;
+			} catch { /* unreadable snippet: ignored */ }
+		}
+		// Images used as backgrounds: resolved like note links and published as attachments.
+		if (css && opts.assetsEnabled) {
+			css = await replaceAsync(css, /url\(\s*(["']?)([^"')]+)\1\s*\)/gi, async (m) => {
+				const ref = m[2].trim();
+				if (/^(https?:|data:|linvau-asset:|#)/i.test(ref)) return m[0];
+				let p = ref;
+				try { p = decodeURIComponent(ref); } catch { /* as written */ }
+				p = p.replace(/^\.?\//, "").split(/[?#]/)[0];
+				const byPath = this.app.vault.getAbstractFileByPath(p);
+				const dest = this.app.metadataCache.getFirstLinkpathDest(p, file.path) ?? (byPath instanceof TFile ? byPath : null);
+				if (!dest || !IMAGE_EXT.has(dest.extension.toLowerCase())) { skipped.push(`${p} (CSS background): not found in the vault`); return m[0]; }
+				const a = await useAsset(dest);
+				return a ? `url("linvau-asset:${a.hash}")` : m[0];
+			});
+		}
+		return { cssclasses, classes, css };
 	}
 
 	/**

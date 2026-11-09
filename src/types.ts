@@ -40,6 +40,8 @@ export interface LinvauSettings {
 	debounceSeconds: number;
 	maxWaitSeconds: number;
 	verbose: boolean;
+	/** Publish the CSS snippet rules that style this note's classes (cssclasses, HTML class=…). */
+	publishStyles: boolean;
 }
 
 export interface LatencySample {
@@ -77,6 +79,7 @@ export const DEFAULT_SETTINGS: LinvauSettings = {
 	debounceSeconds: 5,
 	maxWaitSeconds: 30,
 	verbose: false,
+	publishStyles: true,
 };
 
 export const MAX_LATENCY_SAMPLES = 500;

@@ -722,6 +722,7 @@ export default class LinvauPlugin extends Plugin {
 		return {
 			assetsEnabled: rec.assetsEnabled !== false,
 			approvedEmbeds: new Set(rec.approvedEmbeds ?? []),
+			stylesEnabled: this.data.settings.publishStyles !== false,
 			publishedNoteId: (p) => {
 				const r = this.data.notes[p];
 				return r && (r.state === "ACTIVE" || r.state === "PUBLISHING") ? r.noteId : null;
@@ -886,55 +887,70 @@ export default class LinvauPlugin extends Plugin {
 	}
 
 	/** Context menu (file explorer, tab header and editor right-click). Options depend on the link state. */
+	/**
+	 * Context menu (file explorer, tab header and editor right-click): one "Linvau" entry with a submenu,
+	 * like Obsidian's own "Copy path ›". The header shows the live version (P8); options depend on the link
+	 * state and are grouped (publishing · sharing · access · link). Without submenu support (older versions,
+	 * some mobile builds) the same items are listed flat under that header.
+	 */
 	private addMenuItems(menu: Menu, file: TFile) {
 		const rec = this.data.notes[file.path];
-		const add = (title: string, icon: string, fn: () => void, warning = false) =>
-			menu.addItem((i) => {
-				i.setSection("linvau").setTitle(title).setIcon(icon).onClick(fn);
+		const review = rec?.mode === "REVIEW" ? ` · review${rec.pendingVersion ? ` (v${rec.pendingVersion} pending)` : ""}` : "";
+		const header = rec ? `Linvau · v${rec.version} · ${rec.state.toLowerCase()}${review}` : "Linvau";
+		let sub: Menu | null = null;
+		menu.addItem((i) => {
+			i.setSection("linvau").setTitle(header).setIcon("radio");
+			const make = (i as unknown as { setSubmenu?: () => Menu }).setSubmenu;
+			if (typeof make === "function") sub = make.call(i);
+			else i.setDisabled(true);
+		});
+		const target: Menu = sub ?? menu;
+		const flat = !sub;
+		const add = (group: string, title: string, icon: string, fn: () => void, warning = false) =>
+			target.addItem((i) => {
+				i.setSection(flat ? "linvau" : group).setTitle(flat ? `Linvau: ${title}` : title.charAt(0).toUpperCase() + title.slice(1)).setIcon(icon).onClick(fn);
 				if (warning) i.setWarning(true);
 			});
+		const info = (text: string) => { if (!flat) target.addItem((i) => i.setSection("info").setTitle(text).setIcon("info").setDisabled(true)); };
 
 		if (!rec) {
-			add("Linvau: publish note", "radio", () => void this.publish(file));
-			add("Linvau: open pilot panel", "activity", () => void this.openLogView());
+			add("publish", "publish note", "radio", () => void this.publish(file));
+			add("panel", "open pilot panel", "activity", () => void this.openLogView());
 			return;
 		}
-		// P8: the author sees which version is live right in the menu.
-		const review = rec.mode === "REVIEW" ? ` · review${rec.pendingVersion ? ` (v${rec.pendingVersion} pending)` : ""}` : "";
-		menu.addItem((i) => i.setSection("linvau").setTitle(`Linvau · v${rec.version} · ${rec.state.toLowerCase()}${review} · ${ago(rec.lastSyncAt)}`)
-			.setIcon("info").setDisabled(true));
+		info(`Updated ${ago(rec.lastSyncAt)}${rec.protected ? " · password" : ""}`);
 
 		if (rec.state === "CONFLICT") {
-			add("Linvau: resolve conflict…", "git-compare", () => this.openConflict(file));
-			add("Linvau: copy link", "link", () => void this.copyLink(rec));
+			add("publish", "resolve conflict…", "git-compare", () => this.openConflict(file));
+			add("share", "copy link", "link", () => void this.copyLink(rec));
 		} else if (rec.state === "ORPHAN") {
-			add("Linvau: resume link", "play", () => void this.resume(file));
+			add("link", "resume link", "play", () => void this.resume(file));
 		} else if (rec.state === "SUSPENDED") {
-			add("Linvau: copy link", "link", () => void this.copyLink(rec));
-			add("Linvau: QR code…", "qr-code", () => this.showQr(file));
-			add("Linvau: resume link", "play", () => void this.resume(file));
+			add("share", "copy link", "link", () => void this.copyLink(rec));
+			add("share", "QR code…", "qr-code", () => this.showQr(file));
+			add("link", "resume link", "play", () => void this.resume(file));
 		} else {
 			if (rec.mode === "REVIEW") {
-				add(`Linvau: publish revision…${rec.pendingVersion ? ` (v${rec.pendingVersion})` : ""}`, "send", () => void this.openReview(file));
-				if (rec.pendingVersion) add("Linvau: discard pending changes…", "undo-2", () => this.confirmDiscard(file));
-				add("Linvau: switch to Live mode", "radio", () => void this.setMode(file, "LIVE"));
+				add("publish", `publish revision…${rec.pendingVersion ? ` (v${rec.pendingVersion})` : ""}`, "send", () => void this.openReview(file));
+				if (rec.pendingVersion) add("publish", "discard pending changes…", "undo-2", () => this.confirmDiscard(file));
+				add("publish", "switch to Live mode", "radio", () => void this.setMode(file, "LIVE"));
 			} else {
-				add("Linvau: sync now", "refresh-cw", () => void this.publish(file));
-				add("Linvau: switch to Review mode", "eye", () => void this.setMode(file, "REVIEW"));
+				add("publish", "sync now", "refresh-cw", () => void this.publish(file));
+				add("publish", "switch to Review mode", "eye", () => void this.setMode(file, "REVIEW"));
 			}
-			add("Linvau: copy link", "link", () => void this.copyLink(rec));
-			add("Linvau: QR code…", "qr-code", () => this.showQr(file));
-			add("Linvau: pause link", "pause", () => void this.suspend(file));
 			const n = rec.pendingEmbeds?.length ?? 0;
-			add(`Linvau: embedded content…${n ? ` (${n} pending)` : ""}`, "layers", () => void this.openEmbeds(file));
+			add("publish", `embedded content…${n ? ` (${n} pending)` : ""}`, "layers", () => void this.openEmbeds(file));
+			add("share", "copy link", "link", () => void this.copyLink(rec));
+			add("share", "QR code…", "qr-code", () => this.showQr(file));
+			add("link", "pause link", "pause", () => void this.suspend(file));
 		}
 		if (rec.state !== "CONFLICT") {
-			add(rec.protected ? "Linvau: change password…" : "Linvau: protect with a password…", "lock", () => this.openPassword(file));
-			if (rec.protected) add("Linvau: remove password…", "unlock", () => this.confirmRemovePassword(file));
+			add("access", rec.protected ? "change password…" : "protect with a password…", "lock", () => this.openPassword(file));
+			if (rec.protected) add("access", "remove password…", "unlock", () => this.confirmRemovePassword(file));
 		}
-		add("Linvau: regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
-		add("Linvau: unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
-		add("Linvau: open pilot panel", "activity", () => void this.openLogView());
+		add("link", "regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
+		add("link", "unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
+		add("panel", "open pilot panel", "activity", () => void this.openLogView());
 	}
 
 	async publish(file: TFile) {

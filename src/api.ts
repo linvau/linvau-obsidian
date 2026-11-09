@@ -117,7 +117,7 @@ export class LinvauApi {
 	/** Every note of the account that is not deleted: the shared registry of all devices. */
 	listNotes() { return this.authed<{ notes: RemoteNote[] }>("GET", "/v1/notes"); }
 	updatePath(id: string, path: string) { return this.authed<{ ok: boolean }>("PATCH", `/v1/notes/${id}`, { body: { path } }); }
-	publishVersion(id: string, p: { title: string; markdown: string; hash: string; assets: string[]; panel: unknown[]; baseVersion?: number; force?: boolean }) {
+	publishVersion(id: string, p: { title: string; markdown: string; hash: string; assets: string[]; panel: unknown[]; baseVersion?: number; force?: boolean; style?: unknown }) {
 		return this.authed<PublishedVersion>("POST", `/v1/notes/${id}/versions`, { body: p });
 	}
 	/** Which of these attachment hashes the server does not have yet. */
