@@ -221,8 +221,8 @@ export class ContentBuilder {
 
 		const transform = (md: string, source: TFile, depth: number): Promise<string> =>
 			mapOutsideCode(md, async (text) => {
-				// Obsidian comments are private by definition; block ids are internal anchors.
-				text = text.replace(/%%[\s\S]*?%%/g, "").replace(/[ \t]\^[A-Za-z0-9-]+[ \t]*$/gm, "");
+				// Obsidian and HTML comments are private by definition (never sent); block ids are internal anchors.
+				text = text.replace(/%%[\s\S]*?%%/g, "").replace(/<!--[\s\S]*?-->/g, "").replace(/[ \t]\^[A-Za-z0-9-]+[ \t]*$/gm, "");
 				// ![[file]]  ![[file|alt]]  ![[image.png|300]]  ![[note#heading]]
 				text = await replaceAsync(text, /!\[\[([^\]\n]+?)\]\]/g, async (m) => {
 					// Inside a table the separator is written "\|" (Obsidian's own rule), so the backslash is not part of the name.
@@ -239,6 +239,23 @@ export class ContentBuilder {
 					try { decoded = decodeURIComponent(destRaw); } catch { /* keep as written */ }
 					const [alt, w] = m[1].split(/\\?\|/);
 					return renderEmbed(decoded, alt ?? "", /^\d{1,4}$/.test(w ?? "") ? w : undefined, source, depth);
+				});
+				// <img src="photo.png"> written as HTML (API 0.6.0 keeps sanitized HTML): the file is published
+				// like any other image and the tag points at it. Remote and inline images are left as they are.
+				text = await replaceAsync(text, /<img\b[^>]*?\bsrc\s*=\s*("([^"]*)"|'([^']*)'|([^\s>"']+))[^>]*>/gi, async (m) => {
+					const srcRaw = m[2] ?? m[3] ?? m[4] ?? "";
+					if (!srcRaw || /^(https?:|data:|linvau-asset:)/i.test(srcRaw)) return m[0];
+					let path = srcRaw;
+					try { path = decodeURIComponent(srcRaw); } catch { /* keep as written */ }
+					path = path.replace(/^\.?\//, "").split(/[?#]/)[0];
+					const byLink = this.app.metadataCache.getFirstLinkpathDest(path, source.path);
+					const byPath = this.app.vault.getAbstractFileByPath(path);
+					const dest = byLink ?? (byPath instanceof TFile ? byPath : null);
+					if (!dest) { if (depth === 0) skipped.push(`${path}: not found in the vault`); return m[0]; }
+					if (!IMAGE_EXT.has(dest.extension.toLowerCase())) { if (depth === 0) skipped.push(`${dest.name}: only images can be used in <img>`); return m[0]; }
+					if (!opts.assetsEnabled) return m[0];
+					const ref = await useAsset(dest);
+					return ref ? m[0].replace(m[1], `"linvau-asset:${ref.hash}"`) : m[0];
 				});
 				return text;
 			});
