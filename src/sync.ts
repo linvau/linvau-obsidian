@@ -188,9 +188,14 @@ export class SyncEngine {
 				const { missing } = await plugin.api.checkAssets(rec.noteId, payload.assets.map((a) => a.hash));
 				for (const h of missing) {
 					const ref = payload.assets.find((a) => a.hash === h)!;
-					const f = plugin.app.vault.getAbstractFileByPath(ref.path);
-					if (!(f instanceof TFile)) continue;
-					await plugin.api.putAsset(rec.noteId, ref.hash, ref.ext, await plugin.app.vault.readBinary(f));
+					// Rendered diagrams and drawings travel from memory; everything else is read from the vault.
+					let data = ref.data;
+					if (!data) {
+						const f = plugin.app.vault.getAbstractFileByPath(ref.path);
+						if (!(f instanceof TFile)) continue;
+						data = await plugin.app.vault.readBinary(f);
+					}
+					await plugin.api.putAsset(rec.noteId, ref.hash, ref.ext, data);
 					uploaded += ref.bytes;
 				}
 				if (uploaded && !this.delayCause.has(path)) this.delayCause.set(path, "upload");
@@ -198,7 +203,7 @@ export class SyncEngine {
 
 			const res = await plugin.api.publishVersion(rec.noteId, {
 				title: payload.title, markdown: payload.markdown, hash: payload.hash,
-				assets: payload.assets.map((a) => a.hash), panel: payload.panel, ...(payload.style ? { style: payload.style } : {}),
+				assets: payload.assets.map((a) => a.hash), panel: payload.panel, ...(payload.style ? { style: payload.style } : {}), ...(payload.lang ? { lang: payload.lang } : {}),
 				baseVersion: rec.version, ...(rec.forcePublish ? { force: true } : {}),
 			});
 			const now = Date.now();

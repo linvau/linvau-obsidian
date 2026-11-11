@@ -1,4 +1,4 @@
-import { App, TFile, getFrontMatterInfo, parseYaml } from "obsidian";
+import { App, TFile, getFrontMatterInfo, loadMermaid, parseYaml } from "obsidian";
 
 /**
  * Builds what is published for a note. Everything here runs on the author's device:
@@ -12,7 +12,11 @@ import { App, TFile, getFrontMatterInfo, parseYaml } from "obsidian";
  *    Otherwise a neutral placeholder is sent — not even the name of the embedded note.
  */
 
-export interface AssetRef { hash: string; ext: string; path: string; bytes: number; image: boolean }
+export interface AssetRef {
+	hash: string; ext: string; path: string; bytes: number; image: boolean;
+	/** Generated on this device (a Mermaid diagram or an Excalidraw drawing rendered as SVG/PNG): uploaded from here, not read from the vault. */
+	data?: ArrayBuffer;
+}
 export interface PanelInput { title?: string; url?: string; asset?: string; ext?: string; noteId?: string }
 
 export interface Payload {
@@ -32,6 +36,8 @@ export interface Payload {
 	deps: string[];
 	/** Note styles (API 0.7.0): classes the note uses and the snippet CSS that mentions them. */
 	style?: NoteStyle;
+	/** Language of the note (property linvau-lang), for screen readers and right-to-left scripts. */
+	lang?: string;
 }
 
 export interface NoteStyle { cssclasses: string[]; classes: string[]; css: string }
@@ -136,7 +142,125 @@ export class ContentBuilder {
 	/** file path + mtime + size → content hash, so unchanged attachments are not re-read. */
 	private hashCache = new Map<string, string>();
 
+	/** Rendered diagrams and drawings, by source (Mermaid code, or drawing path + mtime): rendering again on every save would be slow. */
+	private generated = new Map<string, { ext: string; data: ArrayBuffer }>();
+
 	constructor(private app: App) {}
+
+	private async generatedRef(key: string, name: string, make: () => Promise<{ ext: string; data: ArrayBuffer } | null>): Promise<AssetRef | null> {
+		let g = this.generated.get(key);
+		if (!g) {
+			const made = await make();
+			if (!made) return null;
+			g = made;
+			if (this.generated.size > 200) this.generated.clear();
+			this.generated.set(key, g);
+		}
+		if (g.data.byteLength > MAX_ASSET_BYTES) return null;
+		return { hash: await sha256Hex(g.data), ext: g.ext, path: name, bytes: g.data.byteLength, image: true, data: g.data };
+	}
+
+	/**
+	 * Mermaid (0.6.0): rendered here with Obsidian's own Mermaid, light theme and plain-text labels so the SVG
+	 * works as an image anywhere. The code block is kept (AI assistants read the source) and its info string
+	 * points at the published image: ```mermaid linvau-asset:<hash>
+	 */
+	private async mermaidSvg(code: string): Promise<ArrayBuffer | null> {
+		try {
+			const mermaid = await loadMermaid();
+			const init = `%%{init: {"theme": "default", "htmlLabels": false, "flowchart": {"htmlLabels": false}}}%%\n`;
+			const id = `linvau-mmd-${Math.random().toString(36).slice(2)}`;
+			const out = await mermaid.render(id, init + code);
+			let svg = String(typeof out === "string" ? out : out?.svg ?? "");
+			document.getElementById(id)?.remove();
+			document.getElementById(`d${id}`)?.remove();
+			if (!svg.startsWith("<svg")) return null;
+			if (!/xmlns="http:\/\/www.w3.org\/2000\/svg"/.test(svg)) svg = svg.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+			// HTML entities are not valid in a standalone SVG file.
+			svg = svg.replace(/&nbsp;/g, "&#160;").replace(/<br>/g, "<br/>");
+			return new TextEncoder().encode(svg).buffer as ArrayBuffer;
+		} catch {
+			return null;
+		}
+	}
+
+	private async mermaidBlocks(md: string, add: (ref: AssetRef) => void, skipped: string[], depth: number): Promise<string> {
+		if (!/^\s{0,3}(`{3,}|~{3,})\s*mermaid\s*$/im.test(md)) return md;
+		const lines = md.split("\n");
+		for (let i = 0; i < lines.length; i++) {
+			const open = lines[i].match(/^(\s{0,3})(`{3,}|~{3,})\s*mermaid\s*$/i);
+			if (!open) {
+				const other = lines[i].match(/^\s{0,3}(`{3,}|~{3,})/);
+				if (other) { // skip any other code block whole
+					let j = i + 1;
+					while (j < lines.length && !(lines[j].trim().startsWith(other[1][0].repeat(other[1].length)))) j++;
+					i = j;
+				}
+				continue;
+			}
+			let j = i + 1;
+			while (j < lines.length && !lines[j].trim().startsWith(open[2][0].repeat(open[2].length))) j++;
+			const code = lines.slice(i + 1, j).join("\n");
+			const ref = await this.generatedRef(`mmd:${code}`, "Mermaid diagram", async () => {
+				const data = await this.mermaidSvg(code);
+				return data ? { ext: "svg", data } : null;
+			});
+			if (ref) {
+				add(ref);
+				lines[i] = `${open[1]}${open[2]}mermaid linvau-asset:${ref.hash}`;
+			} else if (depth === 0) {
+				skipped.push("Mermaid diagram: could not be rendered on this device (it is published as code)");
+			}
+			i = j;
+		}
+		return lines.join("\n");
+	}
+
+	/**
+	 * Excalidraw (0.6.0): published as an image. An exported SVG/PNG next to the drawing is used if there is one
+	 * (Excalidraw's auto-export); otherwise the Excalidraw plugin renders it (SVG, PNG as fallback).
+	 */
+	isExcalidraw(f: TFile): boolean {
+		if (f.extension === "excalidraw" || f.path.endsWith(".excalidraw.md")) return true;
+		if (f.extension !== "md") return false;
+		const fm = this.app.metadataCache.getFileCache(f)?.frontmatter as Record<string, unknown> | undefined;
+		return !!fm && "excalidraw-plugin" in fm;
+	}
+
+	async excalidrawImage(f: TFile): Promise<{ file?: TFile; ref?: AssetRef } | null> {
+		const dir = f.parent?.path && f.parent.path !== "/" ? `${f.parent.path}/` : "";
+		const names = [...new Set([f.basename, f.basename.replace(/\.excalidraw$/, "")])];
+		for (const n of names) for (const ext of ["svg", "png"]) {
+			const sib = this.app.vault.getAbstractFileByPath(`${dir}${n}.${ext}`);
+			if (sib instanceof TFile) return { file: sib };
+		}
+		const g = window as unknown as { ExcalidrawAutomate?: { getAPI?: () => unknown } };
+		const eaRoot = g.ExcalidrawAutomate;
+		if (!eaRoot) return null;
+		const ea = (eaRoot.getAPI?.() ?? eaRoot) as {
+			reset?: () => void;
+			createSVG?: (path?: string, embedFont?: boolean, settings?: unknown) => Promise<SVGSVGElement>;
+			createPNG?: (path?: string, scale?: number, settings?: unknown) => Promise<Blob>;
+		};
+		const ref = await this.generatedRef(`exc:${f.path}:${f.stat.mtime}`, f.name, async () => {
+			try {
+				ea.reset?.();
+				const svg = await ea.createSVG?.(f.path, true, { withBackground: true, withTheme: false });
+				if (svg?.outerHTML) {
+					let text = svg.outerHTML;
+					if (!/xmlns=/.test(text)) text = text.replace("<svg", '<svg xmlns="http://www.w3.org/2000/svg"');
+					return { ext: "svg", data: new TextEncoder().encode(text).buffer as ArrayBuffer };
+				}
+			} catch { /* try PNG */ }
+			try {
+				ea.reset?.();
+				const png = await ea.createPNG?.(f.path, 2, { withBackground: true, withTheme: false });
+				if (png) return { ext: "png", data: await png.arrayBuffer() };
+			} catch { /* none */ }
+			return null;
+		});
+		return ref ? { ref } : null;
+	}
 
 	private async assetRef(file: TFile): Promise<AssetRef | null> {
 		if (file.stat.size > MAX_ASSET_BYTES) return null;
@@ -189,6 +313,19 @@ export class ContentBuilder {
 			}
 			const ext = dest.extension.toLowerCase();
 
+			if (this.isExcalidraw(dest)) {
+				if (!opts.assetsEnabled) return PLACEHOLDER;
+				const img = await this.excalidrawImage(dest);
+				const ref = img?.file ? await useAsset(img.file) : img?.ref ?? null;
+				if (img?.ref) { assets.set(img.ref.hash, img.ref); deps.add(dest.path); }
+				if (!ref) {
+					if (depth === 0) skipped.push(`${dest.name}: install the Excalidraw plugin or turn on its SVG auto-export to publish this drawing`);
+					return PLACEHOLDER;
+				}
+				const clean = (s: string) => s.replace(/[[\]\n|]/g, " ").trim();
+				return `![${clean(label) || clean(dest.basename.replace(/\.excalidraw$/, ""))}](linvau-asset:${ref.hash}${width ? `#w=${width}` : ""})`;
+			}
+
 			if (IMAGE_EXT.has(ext) || FILE_EXT.has(ext)) {
 				if (!opts.assetsEnabled) return PLACEHOLDER;
 				const ref = await useAsset(dest);
@@ -225,8 +362,7 @@ export class ContentBuilder {
 			return PLACEHOLDER;
 		};
 
-		const transform = (md: string, source: TFile, depth: number): Promise<string> =>
-			mapOutsideCode(md, async (text) => {
+		const transform = async (md: string, source: TFile, depth: number): Promise<string> => this.mermaidBlocks(await mapOutsideCode(md, async (text) => {
 				// Obsidian and HTML comments are private by definition (never sent); block ids are internal anchors.
 				text = text.replace(/%%[\s\S]*?%%/g, "").replace(/<!--[\s\S]*?-->/g, "").replace(/[ \t]\^[A-Za-z0-9-]+[ \t]*$/gm, "");
 				// ![[file]]  ![[file|alt]]  ![[image.png|300]]  ![[note#heading]]
@@ -264,12 +400,14 @@ export class ContentBuilder {
 					return ref ? m[0].replace(m[1], `"linvau-asset:${ref.hash}"`) : m[0];
 				});
 				return text;
-			});
+			}), (ref) => { if (opts.assetsEnabled) { assets.set(ref.hash, ref); } }, skipped, depth);
 
 		const markdown = await transform(body, file, 0);
 		const panel = await this.buildPanel(props, file, opts, useAsset, skipped);
 		const style = opts.stylesEnabled === false ? undefined : await this.buildStyle(props, markdown, file, opts, useAsset, skipped);
-		const hash = await sha256Hex(`${title}\n\u0000\n${markdown}\n\u0000\n${JSON.stringify(panel)}${style ? `\n\u0000\n${JSON.stringify(style)}` : ""}`);
+		const langProp = props["linvau-lang"];
+		const lang = typeof langProp === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8}){0,3}$/.test(langProp.trim()) ? langProp.trim() : undefined;
+		const hash = await sha256Hex(`${title}\n\u0000\n${markdown}\n\u0000\n${JSON.stringify(panel)}${style ? `\n\u0000\n${JSON.stringify(style)}` : ""}${lang ? `\n\u0000\nlang:${lang}` : ""}`);
 
 		return {
 			title, markdown, hash,
@@ -281,6 +419,7 @@ export class ContentBuilder {
 			skipped,
 			deps: [...deps],
 			...(style ? { style } : {}),
+			...(lang ? { lang } : {}),
 		};
 	}
 
