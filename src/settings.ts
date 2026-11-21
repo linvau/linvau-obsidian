@@ -1,7 +1,9 @@
 import { App, Modal, Notice, PluginSettingTab, Setting } from "obsidian";
 import type LinvauPlugin from "./main";
+import type { Billing } from "./api";
 import { errMsg } from "./util";
 import { DEFAULT_API_BASE, LEGACY_API_BASES } from "./types";
+import { ABUSE_MAIL, SUPPORT_MAIL, siteUrl } from "./plan";
 
 export class LinvauSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: LinvauPlugin) {
@@ -14,7 +16,7 @@ export class LinvauSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("p", {
 			cls: "setting-item-description",
-			text: "Pilot build. Notes are only published when you run “Publish current note”. Nothing else in your vault is read or sent.",
+			text: "Notes are only published when you run “Publish current note”. Nothing else in your vault is read or sent.",
 		});
 
 		new Setting(containerEl).setName("Account").setHeading();
@@ -58,6 +60,8 @@ export class LinvauSettingTab extends PluginSettingTab {
 					if (await this.plugin.ensureConnected()) this.display();
 				}));
 		}
+
+		if (session.connected) this.renderPlan(containerEl);
 
 		new Setting(containerEl)
 			.setName("Test connection")
@@ -123,6 +127,8 @@ export class LinvauSettingTab extends PluginSettingTab {
 					await this.plugin.saveState();
 				}));
 
+		this.renderAbout(containerEl);
+
 		// ── Advanced: folded. The server address is built in (D-54); this is only for pointing at a test server.
 		const adv = containerEl.createEl("details", { cls: "linvau-advanced" });
 		adv.createEl("summary", { text: "Advanced" });
@@ -141,10 +147,62 @@ export class LinvauSettingTab extends PluginSettingTab {
 		if (custom) adv.createDiv({ cls: "setting-item-description mod-warning", text: `This device is using a development server: ${custom}` });
 	}
 
+	/** Plan and subscription. Payment itself happens on the payment provider's page, opened in the browser. */
+	private renderPlan(parent: HTMLElement) {
+		new Setting(parent).setName("Plan").setHeading();
+		const host = parent.createDiv();
+		const draw = (b: Billing | null) => {
+			host.empty();
+			if (!b) {
+				new Setting(host).setName("Plan").setDesc("Could not read your plan right now.")
+					.addButton((x) => x.setButtonText("Try again").onClick(() => void load()));
+				return;
+			}
+			const used = b.usage.activeNotes;
+			if (b.plan === "pro") {
+				const end = b.currentPeriodEnd ? new Date(b.currentPeriodEnd).toLocaleDateString() : null;
+				const state = b.cancelAtPeriodEnd ? (end ? `Ends on ${end} (cancellation scheduled).` : "Cancellation scheduled.")
+					: b.status === "past_due" ? "Your last payment failed: update your card in the subscription portal."
+					: end ? `Renews on ${end}.` : "";
+				new Setting(host).setName("Pro").setDesc(`${used} active shared notes, no limit. ${state}`.trim())
+					.addButton((x) => x.setButtonText("Manage subscription").onClick(() => void this.plugin.openPortal()));
+			} else if (b.plan === "pilot") {
+				new Setting(host).setName("Early access").setDesc("This device uses the early-access token. Connect with your email to see your plan.");
+			} else {
+				const limit = b.limit ?? b.freeNoteLimit;
+				const s = new Setting(host).setName("Free")
+					.setDesc(`${used} of ${limit} active shared notes. Pro removes the limit.`)
+					.addButton((x) => x.setButtonText("Upgrade to Pro").setCta().onClick(() => void this.plugin.openUpgrade()));
+				if (b.status === "refunded" || b.status === "disputed" || b.status === "unpaid") {
+					s.setDesc(`${used} of ${limit} active shared notes. Your subscription ended (${b.status}).`);
+				}
+				if (b.hasPortal) s.addButton((x) => x.setButtonText("Billing portal").onClick(() => void this.plugin.openPortal()));
+			}
+			new Setting(host).setName("Refresh plan").addExtraButton((x) => x.setIcon("refresh-cw").setTooltip("Refresh").onClick(() => void load()));
+		};
+		const load = async () => { draw(this.plugin.plan); draw(await this.plugin.refreshPlan()); };
+		draw(this.plugin.plan);
+		void load();
+	}
+
+	private renderAbout(parent: HTMLElement) {
+		new Setting(parent).setName("About Linvau").setHeading();
+		const lang = this.plugin.deviceInfo().lang;
+		const s = new Setting(parent).setName("Terms, privacy and help")
+			.setDesc("The plugin is MIT-licensed; the Linvau service is proprietary. Linvau is not affiliated with Obsidian.");
+		const links = s.descEl.createDiv({ cls: "linvau-links" });
+		const a = (text: string, href: string) => { links.createEl("a", { text, href }); links.appendText(" · "); };
+		a("Terms", siteUrl("terms", lang));
+		a("Privacy", siteUrl("privacy", lang));
+		a("Support", siteUrl("support", lang));
+		links.createEl("a", { text: `Report abuse (${ABUSE_MAIL})`, href: `mailto:${ABUSE_MAIL}` });
+		s.descEl.createDiv({ text: `Questions: ${SUPPORT_MAIL}` });
+	}
+
 	private async setApiBase(raw: string) {
 		const v = raw.trim().replace(/\/+$/, "");
 		const next = v === DEFAULT_API_BASE || LEGACY_API_BASES.includes(v) ? "" : v;
-		if (next && !/^https?:\/\/[^\s/]+/.test(next)) { new Notice("Linvau: enter a full address, like https://example.workers.dev"); return; }
+		if (next && !/^https?:\/\/[^\s/]+/.test(next)) { new Notice("Linvau: enter a full address, like https://staging.example.com"); return; }
 		if (next === this.plugin.data.settings.apiBase) return;
 		this.plugin.data.settings.apiBase = next;
 		await this.plugin.saveState();

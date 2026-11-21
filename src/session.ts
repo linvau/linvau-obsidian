@@ -3,7 +3,7 @@ import { ApiError, type LinvauApi, type LoginResult, type TokenSource } from "./
 
 /** Stored in this device's local storage (per vault), never in the vault: it does not travel with sync or git. */
 const SESSION_KEY = "linvau-session";
-/** The fixed pilot token of 0.0.x–0.1.4. Removed on first load of 0.1.5. */
+/** The fixed early-access token of 0.0.x–0.1.4. Removed on first load of 0.1.5. */
 export const LEGACY_TOKEN_KEY = "linvau-token";
 /** Renew a little before the access token expires, so a request never leaves with a stale one. */
 const RENEW_MARGIN_MS = 30_000;

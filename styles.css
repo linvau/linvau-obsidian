@@ -1,4 +1,4 @@
-/* Linvau pilot panel — uses Obsidian theme variables only */
+/* Linvau sync panel — uses Obsidian theme variables only */
 .linvau-log { padding: var(--size-4-3); font-size: var(--font-ui-small); }
 .linvau-log h4 { margin: var(--size-4-4) 0 var(--size-4-2); }
 .linvau-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: var(--size-4-2); }
@@ -43,7 +43,7 @@
 	font-size: var(--font-ui-small);
 }
 
-/* 0.1.6: account status in the pilot panel */
+/* 0.1.6: account status in the sync panel */
 .linvau-log .linvau-account {
 	display: flex;
 	align-items: center;
@@ -73,3 +73,6 @@
 .linvau-review .linvau-del { color: var(--color-red); text-decoration: line-through; }
 .linvau-review-sections { margin: 0 0 var(--size-4-2); font-size: var(--font-ui-small); }
 .linvau-badge.state-review { background: var(--color-orange); color: var(--text-on-accent); }
+
+.linvau-links { margin-top: 4px; }
+.linvau-links a { margin-right: 2px; }

@@ -1,5 +1,5 @@
 import { Menu, Notice, Platform, Plugin, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
-import { ApiError, LinvauApi, isAuthLost, type RemoteNote } from "./api";
+import { ApiError, LinvauApi, isAuthLost, type Billing, type RemoteNote } from "./api";
 import { ChoiceModal } from "./choiceModal";
 import { Logger } from "./logger";
 import { LinvauLogView, LOG_VIEW_TYPE } from "./logView";
@@ -16,6 +16,7 @@ import { ConnectModal, connectedNotice } from "./connectModal";
 import { PasswordModal } from "./passwordModal";
 import { ReviewModal } from "./reviewModal";
 import { QrModal } from "./qrModal";
+import { UpgradeModal, openExternal } from "./plan";
 
 /** How long a removed file may stay away before its link is paused (sync tools replace files as delete + create). */
 const DELETE_GRACE_MS = 5 * 60_000;
@@ -34,6 +35,11 @@ export default class LinvauPlugin extends Plugin {
 	logger = new Logger();
 	api!: LinvauApi;
 	session!: Session;
+	/** Last known plan of the account (API 0.9.0). Null until asked, or when disconnected. */
+	plan: Billing | null = null;
+	private lastPlanNotice = 0;
+	private proWatchUntil = 0;
+	private proWatchTimer: number | null = null;
 	private connecting: Promise<boolean> | null = null;
 	private authLostNotified = false;
 	private lastNotConnectedHint = 0;
@@ -71,17 +77,17 @@ export default class LinvauPlugin extends Plugin {
 		this.session = new Session(this.app, this.api, (level, msg) => this.logger[level](msg));
 		this.api.tokens = this.session;
 		this.register(this.session.onChange(() => this.refreshUi()));
-		// 0.1.5: the fixed pilot token is replaced by an account; remove it from this device.
+		// 0.1.5: the fixed early-access token is replaced by an account; remove it from this device.
 		if (this.app.loadLocalStorage(LEGACY_TOKEN_KEY)) {
 			this.app.saveLocalStorage(LEGACY_TOKEN_KEY, null);
-			this.logger.info("pilot token removed from this device; connect with your email to publish");
+			this.logger.info("legacy token removed from this device; connect with your email to publish");
 		}
 		this.sync = new SyncEngine(this);
 		this.builder = new ContentBuilder(this.app);
 
 		this.addSettingTab(new LinvauSettingTab(this.app, this));
 		this.registerView(LOG_VIEW_TYPE, (leaf: WorkspaceLeaf) => new LinvauLogView(leaf, this));
-		this.addRibbonIcon("radio", "Linvau pilot panel", () => void this.openLogView());
+		this.addRibbonIcon("radio", "Linvau sync panel", () => void this.openLogView());
 
 		if (!Platform.isMobile) {
 			this.statusEl = this.addStatusBarItem();
@@ -129,7 +135,7 @@ export default class LinvauPlugin extends Plugin {
 			this.registerInterval(window.setInterval(() => void this.syncRegistry("periodic"), REGISTRY_INTERVAL_MS));
 		});
 
-		this.logger.info(`Linvau pilot ${this.manifest.version} loaded (${this.platformName()})`);
+		this.logger.info(`Linvau ${this.manifest.version} loaded (${this.platformName()})`);
 	}
 
 	onunload() {
@@ -181,7 +187,7 @@ export default class LinvauPlugin extends Plugin {
 				if (!r) { resolve(false); return; }
 				this.session.start(r);
 				this.authLostNotified = false;
-				this.logger.info(`connected this device (${r.device.name})${r.claimedNotes ? `; ${r.claimedNotes} pilot note(s) moved to the account` : ""}`);
+				this.logger.info(`connected this device (${r.device.name})${r.claimedNotes ? `; ${r.claimedNotes} earlier note(s) moved to the account` : ""}`);
 				connectedNotice(r);
 				// Link notes published from other devices, then send what could not sync while disconnected.
 				void this.syncRegistry("connected").then(() => this.syncAll());
@@ -189,6 +195,78 @@ export default class LinvauPlugin extends Plugin {
 			}).open();
 		});
 		return this.connecting;
+	}
+
+	// ── Plan and payment (API 0.9.0). Payment happens on Creem's page; this plugin only opens it.
+
+	/** The API refused because the Free plan is full (HTTP 402). Says so once a minute, with a way to upgrade. */
+	handlePlanLimit(e: unknown): boolean {
+		if (!(e instanceof ApiError) || e.code !== "plan_limit") return false;
+		this.logger.warn(`plan limit reached: ${e.message}`);
+		if (Date.now() - this.lastPlanNotice > 60_000) {
+			this.lastPlanNotice = Date.now();
+			const limit = typeof e.body.limit === "number" ? e.body.limit : 3;
+			const frag = createFragment((el) => {
+				el.appendText(`Linvau: the Free plan allows ${limit} active shared notes. Pause or unpublish one, or `);
+				const a = el.createEl("a", { text: "upgrade to Pro", href: "#" });
+				a.addEventListener("click", (ev) => { ev.preventDefault(); void this.openUpgrade(); });
+				el.appendText(".");
+			});
+			new Notice(frag, 15_000);
+		}
+		return true;
+	}
+
+	/** Reads the plan from the server. Returns null (and keeps the last known plan) if it cannot. */
+	async refreshPlan(): Promise<Billing | null> {
+		if (!this.session.connected) { this.plan = null; return null; }
+		try {
+			const before = this.plan?.plan;
+			const b = await this.api.billing();
+			this.plan = b;
+			if (before && before !== "pro" && b.plan === "pro") {
+				new Notice("Linvau: Pro is active. Thank you!");
+				void this.syncRegistry("plan changed");
+			}
+			this.refreshUi();
+			return b;
+		} catch (e) {
+			this.logger.warn(`could not read the plan: ${errMsg(e)}`);
+			return null;
+		}
+	}
+
+	/** After opening the payment page: ask for the plan every few seconds for up to 10 minutes. */
+	watchForPro() {
+		this.proWatchUntil = Date.now() + 10 * 60_000;
+		if (this.proWatchTimer !== null) return;
+		this.proWatchTimer = window.setInterval(async () => {
+			if (Date.now() > this.proWatchUntil || this.plan?.plan === "pro") {
+				if (this.proWatchTimer !== null) window.clearInterval(this.proWatchTimer);
+				this.proWatchTimer = null;
+				return;
+			}
+			await this.refreshPlan();
+		}, 6000);
+		this.registerInterval(this.proWatchTimer);
+	}
+
+	async openUpgrade() {
+		if (!(await this.ensureConnected("Connect your Linvau account to upgrade."))) return;
+		await this.refreshPlan();
+		if (this.plan?.plan === "pro") { new Notice("Linvau: this account is already on Pro. Use “Manage subscription” to change or cancel it."); return; }
+		new UpgradeModal(this).open();
+	}
+
+	async openPortal() {
+		if (!(await this.ensureConnected("Connect your Linvau account to manage your subscription."))) return;
+		try {
+			const { url } = await this.api.portal();
+			openExternal(url);
+		} catch (e) {
+			if (e instanceof ApiError && e.code === "no_subscription") { new Notice("Linvau: this account has no subscription yet. Use “Upgrade to Pro”."); return; }
+			new Notice(`Linvau: ${errMsg(e)}`);
+		}
 	}
 
 	confirmDisconnect() {
@@ -202,6 +280,7 @@ export default class LinvauPlugin extends Plugin {
 		try { await this.api.logout(); } catch (e) { this.logger.warn(`logout request failed (${errMsg(e)}); the session is removed from this device anyway`); }
 		this.session.clear("disconnected by the author");
 		this.accountNotes = null;
+		this.plan = null;
 		new Notice("Linvau: this device is disconnected.");
 	}
 
@@ -388,6 +467,7 @@ export default class LinvauPlugin extends Plugin {
 			return;
 		}
 		if (isAuthLost(e)) this.onAuthLost((e as ApiError).code);
+		if (this.handlePlanLimit(e)) return;
 		new Notice(`Linvau: ${errMsg(e)}`);
 	}
 
@@ -853,7 +933,7 @@ export default class LinvauPlugin extends Plugin {
 			} });
 		this.addCommand({ id: "embedded-content", name: "Embedded content of current note…", icon: "layers",
 			checkCallback: withActive((f) => void this.openEmbeds(f), true) });
-		this.addCommand({ id: "open-panel", name: "Open pilot panel", icon: "radio", callback: () => void this.openLogView() });
+		this.addCommand({ id: "open-panel", name: "Open sync panel", icon: "radio", callback: () => void this.openLogView() });
 		this.addCommand({ id: "sync-all", name: "Sync all published notes", icon: "refresh-cw", callback: () => this.syncAll() });
 		this.addCommand({ id: "resolve-conflict", name: "Resolve conflict of current note", icon: "git-compare",
 			checkCallback: (checking: boolean) => {
@@ -862,6 +942,8 @@ export default class LinvauPlugin extends Plugin {
 				if (!checking) this.openConflict(f);
 				return true;
 			} });
+		this.addCommand({ id: "upgrade", name: "Upgrade to Pro…", icon: "sparkles", callback: () => void this.openUpgrade() });
+		this.addCommand({ id: "manage-subscription", name: "Manage subscription (billing portal)", icon: "credit-card", callback: () => void this.openPortal() });
 		this.addCommand({ id: "connect", name: "Connect this device", icon: "log-in",
 			callback: () => void this.ensureConnected() });
 		this.addCommand({ id: "disconnect", name: "Disconnect this device", icon: "log-out",
@@ -882,7 +964,7 @@ export default class LinvauPlugin extends Plugin {
 
 	confirmUnpublish(f: { path: string }) {
 		this.confirm("Unpublish note?",
-			"The link will stop working and all published versions will be removed from the pilot server. Your local note is not touched.",
+			"The link will stop working and all published versions will be removed from Linvau. Your local note is not touched.",
 			"Unpublish", () => void this.unpublish(f));
 	}
 
@@ -915,7 +997,7 @@ export default class LinvauPlugin extends Plugin {
 
 		if (!rec) {
 			add("publish", "publish note", "radio", () => void this.publish(file));
-			add("panel", "open pilot panel", "activity", () => void this.openLogView());
+			add("panel", "open sync panel", "activity", () => void this.openLogView());
 			return;
 		}
 		info(`Updated ${ago(rec.lastSyncAt)}${rec.protected ? " · password" : ""}`);
@@ -950,7 +1032,7 @@ export default class LinvauPlugin extends Plugin {
 		}
 		add("link", "regenerate link…", "rotate-ccw", () => this.confirmRegenerate(file));
 		add("link", "unpublish…", "x-circle", () => this.confirmUnpublish(file), true);
-		add("panel", "open pilot panel", "activity", () => void this.openLogView());
+		add("panel", "open sync panel", "activity", () => void this.openLogView());
 	}
 
 	async publish(file: TFile) {
@@ -1022,6 +1104,7 @@ export default class LinvauPlugin extends Plugin {
 			await this.sync.flush(file.path);
 			await this.copyLink(rec);
 		} catch (e) {
+			if (this.handlePlanLimit(e)) return;
 			this.logger.error(`publish failed: ${errMsg(e)}`);
 			new Notice(`Linvau: ${errMsg(e)}`);
 		}
@@ -1083,7 +1166,7 @@ export default class LinvauPlugin extends Plugin {
 			await this.sync.flush(file.path);
 			new Notice("Linvau: link active again (same link and QR).");
 		} catch (e) {
-			new Notice(`Linvau: ${errMsg(e)}`);
+			if (!this.handlePlanLimit(e)) new Notice(`Linvau: ${errMsg(e)}`);
 		}
 		this.refreshUi();
 	}
@@ -1355,7 +1438,7 @@ export default class LinvauPlugin extends Plugin {
 	// ─────────────────────────────── UI
 
 	/**
-	 * Keeps the pilot panel available in the right sidebar without opening it. On phones the
+	 * Keeps the sync panel available in the right sidebar without opening it. On phones the
 	 * sidebar's view list is the main way to reach it, and a view only appears there once it exists.
 	 */
 	private async ensureLogView() {

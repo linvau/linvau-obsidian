@@ -257,6 +257,7 @@ export class SyncEngine {
 			}
 			rec.state = "ERROR";
 			rec.lastError = msg;
+			if (plugin.handlePlanLimit(e)) { this.retries.delete(path); await plugin.saveState(); return; }
 			if (isAuthLost(e)) {
 				// No session on this device: keep the note pending and wait for the author to connect.
 				this.retries.delete(path);
@@ -265,7 +266,7 @@ export class SyncEngine {
 				await plugin.saveState();
 				return;
 			}
-			const permanent = status === 401 || status === 403 || status === 404 || status === 410 || status === 413;
+			const permanent = status === 402 || status === 401 || status === 403 || status === 404 || status === 410 || status === 413;
 			const attempt = (this.retries.get(path) ?? 0) + 1;
 			if (!permanent && attempt <= RETRY_DELAYS_MS.length) {
 				this.retries.set(path, attempt);

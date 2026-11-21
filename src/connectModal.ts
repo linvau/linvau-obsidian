@@ -1,6 +1,7 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 import { ApiError, type LinvauApi, type LoginResult } from "./api";
 import { errMsg } from "./util";
+import { siteUrl } from "./plan";
 
 /**
  * "Connect to Linvau": email → 6-digit code → this device is connected.
@@ -48,6 +49,12 @@ export class ConnectModal extends Modal {
 			text: "Your free account lets you pause, renew or remove your links from any of your devices. "
 				+ "We only ask for your email: we send you a 6-digit code, no password.",
 		});
+		const legal = contentEl.createEl("p", { cls: "setting-item-description" });
+		legal.appendText("By continuing you accept the ");
+		legal.createEl("a", { text: "Terms", href: siteUrl("terms", this.device.lang) });
+		legal.appendText(" and the ");
+		legal.createEl("a", { text: "Privacy Policy", href: siteUrl("privacy", this.device.lang) });
+		legal.appendText(".");
 		let input!: HTMLInputElement;
 		new Setting(contentEl).setName("Email").addText((t) => {
 			input = t.inputEl;
@@ -186,5 +193,5 @@ export class ConnectModal extends Modal {
 
 export function connectedNotice(r: LoginResult) {
 	new Notice(`Linvau: connected as ${r.user.email}.`);
-	if (r.claimedNotes > 0) new Notice(`Linvau: ${r.claimedNotes} note(s) published during the pilot are now in your account.`, 8000);
+	if (r.claimedNotes > 0) new Notice(`Linvau: ${r.claimedNotes} note(s) published earlier are now in your account.`, 8000);
 }

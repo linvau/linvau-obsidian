@@ -30,6 +30,13 @@ export interface LoginResult {
 	user: { id: string; email: string }; device: { id: string; name: string }; claimedNotes: number;
 }
 export interface RefreshResult { accessToken: string; accessExpiresAt: string; refreshExpiresAt: string }
+export interface Billing {
+	mode: "test" | "live"; enforced: boolean; freeNoteLimit: number; checkoutAvailable: boolean;
+	/** "free", "pro", or "pilot" (the legacy token, never limited). */
+	plan: "free" | "pro" | "pilot";
+	status: string; interval?: "month" | "year" | null; currentPeriodEnd?: string | null; cancelAtPeriodEnd?: boolean;
+	hasPortal?: boolean; limit: number | null; usage: { activeNotes: number }; pausedByPlan?: number;
+}
 export interface Device { id: string; name: string; platform: string; createdAt: string; lastSeenAt: string; current: boolean }
 
 /** Supplies a valid access token (renewing it if needed) and can force a renewal. */
@@ -110,6 +117,11 @@ export class LinvauApi {
 	logout() { return this.authed<{ ok: boolean }>("POST", "/v1/auth/logout"); }
 	devices() { return this.authed<{ devices: Device[] }>("GET", "/v1/devices"); }
 	removeDevice(id: string) { return this.authed<{ ok: boolean }>("DELETE", `/v1/devices/${encodeURIComponent(id)}`); }
+
+	// ── plan and payment (API 0.9.0). Payment happens on Creem's page, opened in the browser.
+	billing() { return this.authed<Billing>("GET", "/v1/billing"); }
+	checkout(interval: "month" | "year", lang: string) { return this.authed<{ url: string; interval: string; discount: boolean }>("POST", "/v1/billing/checkout", { body: { interval, lang } }); }
+	portal() { return this.authed<{ url: string }>("POST", "/v1/billing/portal"); }
 
 	// ── notes
 	createNote(path: string, title: string) { return this.authed<CreatedNote>("POST", "/v1/notes", { body: { path, title } }); }

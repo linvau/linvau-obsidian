@@ -6,7 +6,7 @@ export const LOG_VIEW_TYPE = "linvau-log";
 
 const SLA_SYNC_P95_MS = 15_000;
 
-/** Pilot diagnostics panel: sync metrics (P50/P95), published notes and the event log. DOM API only, no innerHTML. */
+/** Sync panel: sync metrics (P50/P95), published notes and the event log. DOM API only, no innerHTML. */
 export class LinvauLogView extends ItemView {
 	private off: (() => void) | null = null;
 	private pending = false;
@@ -16,7 +16,7 @@ export class LinvauLogView extends ItemView {
 	}
 
 	getViewType() { return LOG_VIEW_TYPE; }
-	getDisplayText() { return "Linvau pilot"; }
+	getDisplayText() { return "Linvau sync panel"; }
 	getIcon() { return "radio"; }
 
 	async onOpen() {

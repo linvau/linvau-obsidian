@@ -1,15 +1,15 @@
 {
   "name": "linvau-obsidian",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
-  "description": "Linvau plugin for Obsidian — pilot (M0 spike)",
+  "description": "Linvau plugin for Obsidian: publish notes as live links",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.0.0",
     "builtin-modules": "^4.0.0",
