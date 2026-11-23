@@ -1,3 +1,4 @@
+import { DeleteAccountModal } from "./deleteModal";
 import { Menu, Notice, Platform, Plugin, TAbstractFile, TFile, WorkspaceLeaf } from "obsidian";
 import { ApiError, LinvauApi, isAuthLost, type Billing, type RemoteNote } from "./api";
 import { ChoiceModal } from "./choiceModal";
@@ -267,6 +268,21 @@ export default class LinvauPlugin extends Plugin {
 			if (e instanceof ApiError && e.code === "no_subscription") { new Notice("Linvau: this account has no subscription yet. Use “Upgrade to Pro”."); return; }
 			new Notice(`Linvau: ${errMsg(e)}`);
 		}
+	}
+
+	confirmDeleteAccount() {
+		if (!this.session.connected) { new Notice("Linvau: this device is not connected."); return; }
+		new DeleteAccountModal(this).open();
+	}
+
+	/** After the server erased the account: forget the session and the local link records. Vault files are never touched. */
+	async afterAccountDeleted(notes: number) {
+		this.session.clear("account deleted by the author");
+		this.data.notes = {};
+		this.accountNotes = null;
+		this.plan = null;
+		await this.saveState();
+		new Notice(`Linvau: your account was deleted${notes ? ` (${notes} published note${notes === 1 ? "" : "s"} removed)` : ""}. Your notes in Obsidian were not changed.`, 10000);
 	}
 
 	confirmDisconnect() {

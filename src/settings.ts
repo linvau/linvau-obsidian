@@ -61,7 +61,7 @@ export class LinvauSettingTab extends PluginSettingTab {
 				}));
 		}
 
-		if (session.connected) this.renderPlan(containerEl);
+		if (session.connected) { this.renderPlan(containerEl); this.renderAccount(containerEl); }
 
 		new Setting(containerEl)
 			.setName("Test connection")
@@ -183,6 +183,14 @@ export class LinvauSettingTab extends PluginSettingTab {
 		const load = async () => { draw(this.plugin.plan); draw(await this.plugin.refreshPlan()); };
 		draw(this.plugin.plan);
 		void load();
+	}
+
+	/** Account deletion, kept apart from the everyday buttons. */
+	private renderAccount(parent: HTMLElement) {
+		new Setting(parent).setName("Account").setHeading();
+		new Setting(parent).setName("Delete my account")
+			.setDesc("Permanently removes your account and every published note from Linvau. Your notes in Obsidian stay as they are.")
+			.addButton((b) => b.setButtonText("Delete account…").setWarning().onClick(() => this.plugin.confirmDeleteAccount()));
 	}
 
 	private renderAbout(parent: HTMLElement) {

@@ -57,6 +57,8 @@ These are required by Obsidian's developer policies:
 
 - [Terms](https://linvau.com/terms/) · [Privacy Policy](https://linvau.com/privacy/) · [Support](https://linvau.com/support/)
 - Support: support@linvau.com (Monday to Friday, 9:00–17:00 Argentina time). Report abusive content: abuse@linvau.com.
+- **Delete your account:** Settings → Linvau → Account → *Delete account…*. It removes your account and every published note from Linvau at once (type your email to confirm). Notes in your vault are never touched. Cancel an active Pro subscription first (the plugin opens the portal for you).
+- **Side panel:** list links in the `linvau-panel` property. Besides YouTube, Vimeo, Loom, Figma, Miro, Google Slides and diagrams.net, **Desmos** graphs (`desmos.com/calculator/…`, `/geometry/…`, `/3d/…`) open inside the panel. In the reader, click any image to see it full screen.
 
 ## Development
 

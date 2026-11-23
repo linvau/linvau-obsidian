@@ -114,6 +114,8 @@ export class LinvauApi {
 
 	// ── session
 	me() { return this.authed<Me>("GET", "/v1/me"); }
+	/** Irreversible. The email must be the account's own (typed by the author). API 0.10.0. */
+	deleteAccount(email: string) { return this.authed<{ ok: boolean; deleted: { notes: number } }>("POST", "/v1/account/delete", { body: { email } }); }
 	logout() { return this.authed<{ ok: boolean }>("POST", "/v1/auth/logout"); }
 	devices() { return this.authed<{ devices: Device[] }>("GET", "/v1/devices"); }
 	removeDevice(id: string) { return this.authed<{ ok: boolean }>("DELETE", `/v1/devices/${encodeURIComponent(id)}`); }
